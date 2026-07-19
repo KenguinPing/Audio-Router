@@ -1,0 +1,1560 @@
+﻿#requires -version 5.1
+
+param(
+    [switch]$SelfTest,
+    [switch]$Minimized,
+    [string]$UiPreviewPath
+)
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$nativeCode = @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace AudioSwitchNative
+{
+    public enum DataFlow { Render = 0, Capture = 1, All = 2 }
+    public enum Role { Console = 0, Multimedia = 1, Communications = 2 }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PropertyKey
+    {
+        public Guid FormatId;
+        public int PropertyId;
+        public PropertyKey(Guid formatId, int propertyId) { FormatId = formatId; PropertyId = propertyId; }
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct PropVariant
+    {
+        [FieldOffset(0)] public ushort VarType;
+        [FieldOffset(8)] public IntPtr PointerValue;
+        public string GetString() { return VarType == 31 && PointerValue != IntPtr.Zero ? Marshal.PtrToStringUni(PointerValue) : null; }
+    }
+
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore
+    {
+        [PreserveSig]
+        int GetCount(out int count);
+        [PreserveSig]
+        int GetAt(int index, out PropertyKey key);
+        [PreserveSig]
+        int GetValue(ref PropertyKey key, out PropVariant value);
+        [PreserveSig]
+        int SetValue(ref PropertyKey key, ref PropVariant value);
+        [PreserveSig]
+        int Commit();
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDevice
+    {
+        [PreserveSig]
+        int Activate(ref Guid iid, int context, IntPtr activationParams, out IntPtr instance);
+        [PreserveSig]
+        int OpenPropertyStore(int access, out IPropertyStore properties);
+        [PreserveSig]
+        int GetId(out IntPtr id);
+        [PreserveSig]
+        int GetState(out int state);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection
+    {
+        [PreserveSig]
+        int GetCount(out int count);
+        [PreserveSig]
+        int Item(int index, out IMMDevice device);
+    }
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceEnumerator
+    {
+        [PreserveSig]
+        int EnumAudioEndpoints(DataFlow flow, int stateMask, out IMMDeviceCollection devices);
+        [PreserveSig]
+        int GetDefaultAudioEndpoint(DataFlow flow, Role role, out IMMDevice endpoint);
+        [PreserveSig]
+        int GetDevice(string id, out IMMDevice device);
+        [PreserveSig]
+        int RegisterEndpointNotificationCallback(IntPtr client);
+        [PreserveSig]
+        int UnregisterEndpointNotificationCallback(IntPtr client);
+    }
+
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    class MMDeviceEnumeratorComObject { }
+
+    [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig
+    {
+        [PreserveSig]
+        int GetMixFormat(string deviceId, IntPtr format);
+        [PreserveSig]
+        int GetDeviceFormat(string deviceId, int defaultFormat, IntPtr format);
+        [PreserveSig]
+        int ResetDeviceFormat(string deviceId);
+        [PreserveSig]
+        int SetDeviceFormat(string deviceId, IntPtr endpointFormat, IntPtr mixFormat);
+        [PreserveSig]
+        int GetProcessingPeriod(string deviceId, int defaultPeriod, IntPtr period, IntPtr minimumPeriod);
+        [PreserveSig]
+        int SetProcessingPeriod(string deviceId, IntPtr period);
+        [PreserveSig]
+        int GetShareMode(string deviceId, IntPtr mode);
+        [PreserveSig]
+        int SetShareMode(string deviceId, IntPtr mode);
+        [PreserveSig]
+        int GetPropertyValue(string deviceId, ref PropertyKey key, out PropVariant value);
+        [PreserveSig]
+        int SetPropertyValue(string deviceId, ref PropertyKey key, ref PropVariant value);
+        [PreserveSig]
+        int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, Role role);
+        [PreserveSig]
+        int SetEndpointVisibility(string deviceId, int visible);
+    }
+
+    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    class PolicyConfigComObject { }
+
+    public sealed class AudioEndpoint
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public bool IsDefault { get; set; }
+        public override string ToString() { return Name + (IsDefault ? "  ✓ 当前默认" : ""); }
+    }
+
+    public static class AudioManager
+    {
+        const int DeviceStateActive = 1;
+        static readonly PropertyKey FriendlyName = new PropertyKey(new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 14);
+
+        static string ReadId(IMMDevice device)
+        {
+            IntPtr pointer;
+            Marshal.ThrowExceptionForHR(device.GetId(out pointer));
+            try { return Marshal.PtrToStringUni(pointer); }
+            finally { if (pointer != IntPtr.Zero) Marshal.FreeCoTaskMem(pointer); }
+        }
+
+        public static string GetDefaultId(DataFlow flow)
+        {
+            IMMDeviceEnumerator enumerator = null;
+            IMMDevice device = null;
+            try
+            {
+                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(flow, Role.Console, out device));
+                return ReadId(device);
+            }
+            finally
+            {
+                if (device != null) Marshal.ReleaseComObject(device);
+                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+            }
+        }
+
+        public static List<AudioEndpoint> GetEndpoints(DataFlow flow)
+        {
+            var result = new List<AudioEndpoint>();
+            IMMDeviceEnumerator enumerator = null;
+            IMMDeviceCollection collection = null;
+            IMMDevice defaultDevice = null;
+            string defaultId = null;
+            try
+            {
+                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                if (enumerator.GetDefaultAudioEndpoint(flow, Role.Console, out defaultDevice) == 0 && defaultDevice != null)
+                    defaultId = ReadId(defaultDevice);
+
+                Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(flow, DeviceStateActive, out collection));
+                int count;
+                Marshal.ThrowExceptionForHR(collection.GetCount(out count));
+                for (int i = 0; i < count; i++)
+                {
+                    IMMDevice device = null;
+                    IPropertyStore store = null;
+                    try
+                    {
+                        Marshal.ThrowExceptionForHR(collection.Item(i, out device));
+                        string id = ReadId(device);
+                        Marshal.ThrowExceptionForHR(device.OpenPropertyStore(0, out store));
+                        PropVariant value;
+                        var key = FriendlyName;
+                        Marshal.ThrowExceptionForHR(store.GetValue(ref key, out value));
+                        result.Add(new AudioEndpoint { Id = id, Name = value.GetString() ?? id, IsDefault = String.Equals(id, defaultId, StringComparison.OrdinalIgnoreCase) });
+                    }
+                    finally
+                    {
+                        if (store != null) Marshal.ReleaseComObject(store);
+                        if (device != null) Marshal.ReleaseComObject(device);
+                    }
+                }
+            }
+            finally
+            {
+                if (defaultDevice != null) Marshal.ReleaseComObject(defaultDevice);
+                if (collection != null) Marshal.ReleaseComObject(collection);
+                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+            }
+            result.Sort((a, b) => String.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
+            return result;
+        }
+
+        public static void SetDefault(string deviceId)
+        {
+            IPolicyConfig policy = null;
+            try
+            {
+                policy = (IPolicyConfig)new PolicyConfigComObject();
+                Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(deviceId, Role.Console));
+                Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(deviceId, Role.Multimedia));
+                Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(deviceId, Role.Communications));
+            }
+            finally
+            {
+                if (policy != null) Marshal.ReleaseComObject(policy);
+            }
+        }
+    }
+
+    public sealed class ModernMenuColorTable : ProfessionalColorTable
+    {
+        readonly bool light;
+        public ModernMenuColorTable(bool lightMode) { light = lightMode; UseSystemColors = false; }
+        Color Background { get { return light ? Color.FromArgb(250, 250, 252) : Color.FromArgb(24, 26, 31); } }
+        Color Selected { get { return light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(43, 47, 55); } }
+        Color Border { get { return light ? Color.FromArgb(210, 214, 221) : Color.FromArgb(60, 64, 74); } }
+        public override Color ToolStripDropDownBackground { get { return Background; } }
+        public override Color ImageMarginGradientBegin { get { return Background; } }
+        public override Color ImageMarginGradientMiddle { get { return Background; } }
+        public override Color ImageMarginGradientEnd { get { return Background; } }
+        public override Color MenuBorder { get { return Border; } }
+        public override Color MenuItemBorder { get { return Selected; } }
+        public override Color MenuItemSelected { get { return Selected; } }
+        public override Color MenuItemSelectedGradientBegin { get { return Selected; } }
+        public override Color MenuItemSelectedGradientEnd { get { return Selected; } }
+        public override Color MenuItemPressedGradientBegin { get { return Selected; } }
+        public override Color MenuItemPressedGradientMiddle { get { return Selected; } }
+        public override Color MenuItemPressedGradientEnd { get { return Selected; } }
+        public override Color SeparatorDark { get { return Border; } }
+        public override Color SeparatorLight { get { return Background; } }
+    }
+
+    public sealed class ModernMenuRenderer : ToolStripProfessionalRenderer
+    {
+        readonly bool light;
+        readonly Color accent = Color.FromArgb(99, 255, 87);
+        public ModernMenuRenderer(bool lightMode) : base(new ModernMenuColorTable(lightMode))
+        {
+            light = lightMode;
+            RoundedEdges = false;
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            using (var pen = new Pen(light ? Color.FromArgb(210, 214, 221) : Color.FromArgb(60, 64, 74)))
+                e.Graphics.DrawRectangle(pen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+        }
+
+        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+        {
+            const int size = 7;
+            var x = e.ImageRectangle.Left + (e.ImageRectangle.Width - size) / 2;
+            var y = e.ImageRectangle.Top + (e.ImageRectangle.Height - size) / 2;
+            using (var brush = new SolidBrush(accent))
+                e.Graphics.FillEllipse(brush, x, y, size, size);
+        }
+    }
+
+    public sealed class AcrylicPanel : Panel
+    {
+        public int CornerRadius { get; set; }
+        public Color FillColor { get; set; }
+        public Color BorderColor { get; set; }
+
+        public AcrylicPanel()
+        {
+            CornerRadius = 14;
+            FillColor = Color.FromArgb(205, 22, 32, 48);
+            BorderColor = Color.FromArgb(95, 72, 91, 116);
+            BackColor = Color.Transparent;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        static GraphicsPath RoundedPath(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            var diameter = Math.Max(2, radius * 2);
+            var arc = new Rectangle(bounds.X, bounds.Y, diameter, diameter);
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            using (var path = RoundedPath(bounds, CornerRadius))
+            using (var brush = new SolidBrush(FillColor))
+            using (var pen = new Pen(BorderColor))
+            {
+                e.Graphics.FillPath(brush, path);
+                e.Graphics.DrawPath(pen, path);
+            }
+        }
+    }
+
+    public sealed class ModernTextBox : UserControl
+    {
+        readonly TextBox editor = new TextBox();
+        public Color FieldColor { get; set; }
+        public Color BorderColor { get; set; }
+        public Color ActiveBorderColor { get; set; }
+
+        public override string Text
+        {
+            get { return editor.Text; }
+            set { editor.Text = value ?? String.Empty; }
+        }
+
+        public ModernTextBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            FieldColor = Color.FromArgb(16, 25, 40);
+            BorderColor = Color.FromArgb(55, 73, 96);
+            ActiveBorderColor = Color.FromArgb(89, 232, 159);
+            editor.BorderStyle = BorderStyle.None;
+            editor.BackColor = FieldColor;
+            editor.ForeColor = Color.FromArgb(244, 247, 251);
+            editor.Location = new Point(10, 7);
+            editor.TextChanged += delegate { base.Text = editor.Text; };
+            editor.GotFocus += delegate { Invalidate(); };
+            editor.LostFocus += delegate { Invalidate(); };
+            Controls.Add(editor);
+            Height = 31;
+            Cursor = Cursors.IBeam;
+        }
+
+        public void Clear() { editor.Clear(); }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            base.OnFontChanged(e);
+            editor.Font = Font;
+            LayoutEditor();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutEditor();
+            Invalidate();
+        }
+
+        void LayoutEditor()
+        {
+            editor.Location = new Point(10, Math.Max(5, (Height - editor.PreferredHeight) / 2));
+            editor.Width = Math.Max(1, Width - 20);
+            editor.BackColor = FieldColor;
+            editor.ForeColor = ForeColor;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            editor.Focus();
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (var path = RoundedRect(rect, 7))
+            using (var fill = new SolidBrush(FieldColor))
+            using (var border = new Pen(editor.Focused ? ActiveBorderColor : BorderColor))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+        }
+
+        internal static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            int diameter = Math.Max(2, radius * 2);
+            var arc = new Rectangle(bounds.X, bounds.Y, diameter, diameter);
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter; path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter; path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left; path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    public sealed class ModernComboBox : Control
+    {
+        readonly ArrayList items = new ArrayList();
+        int selectedIndex = -1;
+        ContextMenuStrip menu;
+        public IList Items { get { return items; } }
+        public Color FieldColor { get; set; }
+        public Color BorderColor { get; set; }
+        public Color ActiveBorderColor { get; set; }
+        public event EventHandler SelectedIndexChanged;
+
+        public int SelectedIndex
+        {
+            get { return selectedIndex; }
+            set
+            {
+                int next = value < -1 ? -1 : (value >= items.Count ? items.Count - 1 : value);
+                if (selectedIndex == next) return;
+                selectedIndex = next;
+                Invalidate();
+                if (SelectedIndexChanged != null) SelectedIndexChanged(this, EventArgs.Empty);
+            }
+        }
+
+        public object SelectedItem
+        {
+            get { return selectedIndex >= 0 && selectedIndex < items.Count ? items[selectedIndex] : null; }
+        }
+
+        public ModernComboBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
+                     ControlStyles.Selectable, true);
+            BackColor = Color.Transparent;
+            FieldColor = Color.FromArgb(16, 25, 40);
+            BorderColor = Color.FromArgb(55, 73, 96);
+            ActiveBorderColor = Color.FromArgb(89, 232, 159);
+            ForeColor = Color.FromArgb(244, 247, 251);
+            Height = 31;
+            Cursor = Cursors.Hand;
+            TabStop = true;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+            ShowMenu();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { ShowMenu(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Down && selectedIndex < items.Count - 1) { SelectedIndex++; e.Handled = true; }
+            else if (e.KeyCode == Keys.Up && selectedIndex > 0) { SelectedIndex--; e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+
+        void ShowMenu()
+        {
+            if (items.Count == 0) return;
+            if (menu != null) { menu.Dispose(); menu = null; }
+            menu = new ContextMenuStrip();
+            menu.Renderer = new ModernMenuRenderer(false);
+            menu.ShowImageMargin = false;
+            menu.ShowCheckMargin = false;
+            menu.BackColor = Color.FromArgb(24, 26, 31);
+            menu.ForeColor = Color.FromArgb(239, 241, 245);
+            menu.Font = Font;
+            menu.Padding = new Padding(5);
+            menu.MinimumSize = new Size(Width, 0);
+            for (int i = 0; i < items.Count; i++)
+            {
+                int index = i;
+                var item = new ToolStripMenuItem(items[i] == null ? String.Empty : items[i].ToString());
+                item.ForeColor = Color.FromArgb(239, 241, 245);
+                item.Padding = new Padding(10, 6, 10, 6);
+                if (i == selectedIndex) item.Font = new Font(Font, FontStyle.Bold);
+                item.Click += delegate { SelectedIndex = index; };
+                menu.Items.Add(item);
+            }
+            menu.Show(this, new Point(0, Height + 3));
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (var path = ModernTextBox.RoundedRect(rect, 7))
+            using (var fill = new SolidBrush(FieldColor))
+            using (var border = new Pen(Focused ? ActiveBorderColor : BorderColor))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+
+            string text = SelectedItem == null ? String.Empty : SelectedItem.ToString();
+            var textRect = new Rectangle(10, 1, Math.Max(1, Width - 38), Height - 2);
+            TextRenderer.DrawText(e.Graphics, text, Font, textRect, ForeColor,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+
+            int cx = Width - 17, cy = Height / 2;
+            using (var pen = new Pen(Color.FromArgb(174, 187, 204), 1.6f))
+            {
+                pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                e.Graphics.DrawLine(pen, cx - 4, cy - 2, cx, cy + 2);
+                e.Graphics.DrawLine(pen, cx, cy + 2, cx + 4, cy - 2);
+            }
+        }
+    }
+
+    public sealed class ModernCheckBox : CheckBox
+    {
+        public ModernCheckBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            ForeColor = Color.FromArgb(190, 201, 216);
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var box = new Rectangle(1, Math.Max(1, (Height - 15) / 2), 15, 15);
+            using (var path = ModernTextBox.RoundedRect(box, 4))
+            using (var fill = new SolidBrush(Checked ? Color.FromArgb(89, 232, 159) : Color.FromArgb(16, 25, 40)))
+            using (var border = new Pen(Checked ? Color.FromArgb(89, 232, 159) : Color.FromArgb(79, 98, 123)))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+            if (Checked)
+            {
+                using (var pen = new Pen(Color.FromArgb(7, 31, 19), 2.2f))
+                {
+                    pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                    e.Graphics.DrawLines(pen, new[] { new Point(4, box.Top + 8), new Point(7, box.Top + 11), new Point(13, box.Top + 4) });
+                }
+            }
+            var textRect = new Rectangle(23, 0, Math.Max(1, Width - 23), Height);
+            TextRenderer.DrawText(e.Graphics, Text, Font, textRect, ForeColor,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+    }
+
+    public sealed class ModernVScrollBar : Control
+    {
+        int maximum;
+        int currentValue;
+        bool dragging;
+        int dragOffset;
+        public int LargeChange { get; set; }
+        public event EventHandler ValueChanged;
+
+        public int Maximum
+        {
+            get { return maximum; }
+            set { maximum = Math.Max(0, value); Value = currentValue; Invalidate(); }
+        }
+        public int Value
+        {
+            get { return currentValue; }
+            set
+            {
+                int next = Math.Max(0, Math.Min(maximum, value));
+                if (next == currentValue) return;
+                currentValue = next;
+                Invalidate();
+                if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+            }
+        }
+
+        public ModernVScrollBar()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+            LargeChange = 180;
+            Width = 12;
+            Cursor = Cursors.Hand;
+        }
+
+        Rectangle Thumb()
+        {
+            int usable = Math.Max(1, Height - 8);
+            int thumbHeight = maximum == 0 ? usable : Math.Max(30, (int)(usable * (LargeChange / (double)(maximum + LargeChange))));
+            int travel = Math.Max(0, usable - thumbHeight);
+            int y = 4 + (maximum == 0 ? 0 : (int)(travel * (currentValue / (double)maximum)));
+            return new Rectangle(2, y, Math.Max(6, Width - 4), thumbHeight);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var track = new SolidBrush(Color.FromArgb(55, 72, 91, 116)))
+                e.Graphics.FillRectangle(track, Width / 2 - 1, 4, 2, Height - 8);
+            var thumb = Thumb();
+            using (var path = ModernTextBox.RoundedRect(thumb, Math.Max(3, thumb.Width / 2)))
+            using (var brush = new SolidBrush(Color.FromArgb(120, 144, 166)))
+                e.Graphics.FillPath(brush, path);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            var thumb = Thumb();
+            if (thumb.Contains(e.Location)) { dragging = true; dragOffset = e.Y - thumb.Y; }
+            else Value += e.Y < thumb.Y ? -LargeChange : LargeChange;
+            Capture = true;
+            base.OnMouseDown(e);
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (dragging && maximum > 0)
+            {
+                var thumb = Thumb();
+                int travel = Math.Max(1, Height - 8 - thumb.Height);
+                Value = (int)Math.Round(Math.Max(0, Math.Min(travel, e.Y - 4 - dragOffset)) * maximum / (double)travel);
+            }
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { dragging = false; Capture = false; base.OnMouseUp(e); }
+        protected override void OnMouseWheel(MouseEventArgs e) { Value -= Math.Sign(e.Delta) * 48; base.OnMouseWheel(e); }
+    }
+
+    public static class WindowEffects
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct AccentPolicy
+        {
+            public int AccentState;
+            public int AccentFlags;
+            public int GradientColor;
+            public int AnimationId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct WindowCompositionAttributeData
+        {
+            public int Attribute;
+            public IntPtr Data;
+            public int SizeOfData;
+        }
+
+        [DllImport("user32.dll")]
+        static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        public static void EnableAcrylic(IntPtr hwnd, bool dark)
+        {
+            try
+            {
+                int darkValue = dark ? 1 : 0;
+                DwmSetWindowAttribute(hwnd, 20, ref darkValue, sizeof(int));
+                int corners = 2;
+                DwmSetWindowAttribute(hwnd, 33, ref corners, sizeof(int));
+                if (Environment.OSVersion.Version.Build >= 22000)
+                {
+                    int backdrop = 3;
+                    DwmSetWindowAttribute(hwnd, 38, ref backdrop, sizeof(int));
+                }
+
+                var accent = new AccentPolicy();
+                accent.AccentState = 4;
+                accent.AccentFlags = 2;
+                accent.GradientColor = dark ? unchecked((int)0xD020120B) : unchecked((int)0xD8F5F5F5);
+                var size = Marshal.SizeOf(accent);
+                var pointer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(accent, pointer, false);
+                    var data = new WindowCompositionAttributeData { Attribute = 19, Data = pointer, SizeOfData = size };
+                    SetWindowCompositionAttribute(hwnd, ref data);
+                }
+                finally { Marshal.FreeHGlobal(pointer); }
+            }
+            catch { }
+        }
+
+        public static void RoundControl(Control control, int radius)
+        {
+            if (control.Width <= 1 || control.Height <= 1) return;
+            var bounds = new Rectangle(0, 0, control.Width, control.Height);
+            using (var path = new GraphicsPath())
+            {
+                int diameter = Math.Max(2, radius * 2);
+                var arc = new Rectangle(bounds.X, bounds.Y, diameter, diameter);
+                path.AddArc(arc, 180, 90);
+                arc.X = bounds.Right - diameter;
+                path.AddArc(arc, 270, 90);
+                arc.Y = bounds.Bottom - diameter;
+                path.AddArc(arc, 0, 90);
+                arc.X = bounds.Left;
+                path.AddArc(arc, 90, 90);
+                path.CloseFigure();
+                var old = control.Region;
+                control.Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+        }
+    }
+}
+'@
+
+try {
+    Add-Type -TypeDefinition $nativeCode -Language CSharp -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll') -ErrorAction Stop
+} catch {
+    [System.Windows.Forms.MessageBox]::Show("无法加载 Windows 音频组件。`r`n`r`n$($_.Exception.Message)", "音频一键切换", 'OK', 'Error') | Out-Null
+    exit 1
+}
+
+if ($SelfTest) {
+    try {
+        $testIconPath = Join-Path $PSScriptRoot 'assets\audio-switch-icon-driver.ico'
+        if (-not (Test-Path -LiteralPath $testIconPath)) { throw "Icon file not found: $testIconPath" }
+        $testIcon = [System.Drawing.Icon]::new($testIconPath)
+        $testIcon.Dispose()
+        $testMenu = New-Object System.Windows.Forms.ContextMenuStrip
+        $testMenu.Renderer = [AudioSwitchNative.ModernMenuRenderer]::new($false)
+        $testMenu.Dispose()
+        $testOutputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Render))
+        $testInputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Capture))
+        Write-Output "SELFTEST OK"
+        $defaultOutputId = [AudioSwitchNative.AudioManager]::GetDefaultId([AudioSwitchNative.DataFlow]::Render)
+        $defaultInputId = [AudioSwitchNative.AudioManager]::GetDefaultId([AudioSwitchNative.DataFlow]::Capture)
+        Write-Output "Default output ID found: $(-not [string]::IsNullOrWhiteSpace($defaultOutputId))"
+        Write-Output "Default input ID found: $(-not [string]::IsNullOrWhiteSpace($defaultInputId))"
+        Write-Output "Outputs: $($testOutputs.Count)"
+        foreach ($device in $testOutputs) { Write-Output "  $($device.Name)$(if ($device.Id -eq $defaultOutputId) { ' [default]' })" }
+        Write-Output "Inputs: $($testInputs.Count)"
+        foreach ($device in $testInputs) { Write-Output "  $($device.Name)$(if ($device.Id -eq $defaultInputId) { ' [default]' })" }
+        exit 0
+    } catch {
+        Write-Error "SELFTEST FAILED: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
+$script:AppDir = Join-Path $env:LOCALAPPDATA 'AudioSwitch'
+$script:ProfileFile = Join-Path $script:AppDir 'profiles.json'
+$script:SettingsFile = Join-Path $script:AppDir 'settings.json'
+$script:Profiles = @()
+$script:Outputs = @()
+$script:Inputs = @()
+$script:ClosingForReal = $false
+$script:InitializingSettings = $true
+$script:Settings = [PSCustomObject]@{ StartMinimized = $false }
+$script:StartHidden = [bool]$Minimized
+$script:TrayMenuRenderer = $null
+
+if (-not (Test-Path $script:AppDir)) { New-Item -ItemType Directory -Path $script:AppDir -Force | Out-Null }
+
+function Load-Profiles {
+    $script:Profiles = @()
+    if (Test-Path $script:ProfileFile) {
+        try {
+            $loaded = Get-Content -LiteralPath $script:ProfileFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $loaded) { $script:Profiles = @($loaded) }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("方案文件损坏，已忽略。`r`n$($_.Exception.Message)", '音频一键切换', 'OK', 'Warning') | Out-Null
+        }
+    }
+}
+
+function Save-Profiles {
+    ConvertTo-Json -InputObject @($script:Profiles) -Depth 5 | Set-Content -LiteralPath $script:ProfileFile -Encoding UTF8
+}
+
+function Load-Settings {
+    $script:Settings = [PSCustomObject]@{ StartMinimized = $false }
+    if (Test-Path $script:SettingsFile) {
+        try {
+            $loaded = Get-Content -LiteralPath $script:SettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $loaded -and $null -ne $loaded.StartMinimized) {
+                $script:Settings.StartMinimized = [bool]$loaded.StartMinimized
+            }
+        } catch {
+            $script:Settings = [PSCustomObject]@{ StartMinimized = $false }
+        }
+    }
+}
+
+function Save-Settings {
+    $script:Settings | ConvertTo-Json | Set-Content -LiteralPath $script:SettingsFile -Encoding UTF8
+}
+
+function Test-StartupRegistration {
+    try {
+        $value = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AudioSwitch' -ErrorAction Stop).AudioSwitch
+        $launcher = Join-Path $PSScriptRoot '启动音频切换器.vbs'
+        return (-not [string]::IsNullOrWhiteSpace([string]$value)) -and ([string]$value).Contains($launcher)
+    } catch {
+        return $false
+    }
+}
+
+function Set-StartupRegistration([bool]$Enabled) {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if ($Enabled) {
+        $launcher = Join-Path $PSScriptRoot '启动音频切换器.vbs'
+        $command = 'wscript.exe "{0}" /minimized' -f $launcher
+        if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+        New-ItemProperty -LiteralPath $key -Name 'AudioSwitch' -Value $command -PropertyType String -Force | Out-Null
+    } else {
+        Remove-ItemProperty -LiteralPath $key -Name 'AudioSwitch' -ErrorAction SilentlyContinue
+    }
+}
+
+function New-Label([string]$Text, [float]$Size, [System.Drawing.FontStyle]$Style = 'Regular') {
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Text
+    $label.AutoSize = $true
+    $label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', $Size, $Style)
+    $label.ForeColor = [System.Drawing.Color]::FromArgb(229, 231, 235)
+    return $label
+}
+
+function Initialize-ThemedComboBox($Combo, $Background, $SelectedBackground, $Foreground) {
+    $Combo.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+    $Combo.ItemHeight = 24
+    $drawBackground = $Background
+    $drawSelected = $SelectedBackground
+    $drawForeground = $Foreground
+    $Combo.Add_DrawItem({
+        param($sender, $eventArgs)
+        if ($eventArgs.Index -lt 0) { return }
+        $isSelected = (($eventArgs.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0)
+        $fill = if ($isSelected) { $drawSelected } else { $drawBackground }
+        $brush = New-Object System.Drawing.SolidBrush($fill)
+        $eventArgs.Graphics.FillRectangle($brush, $eventArgs.Bounds)
+        $brush.Dispose()
+        $textBounds = New-Object System.Drawing.Rectangle(($eventArgs.Bounds.X + 7), $eventArgs.Bounds.Y, ($eventArgs.Bounds.Width - 9), $eventArgs.Bounds.Height)
+        [System.Windows.Forms.TextRenderer]::DrawText($eventArgs.Graphics, $sender.Items[$eventArgs.Index].ToString(), $sender.Font, $textBounds, $drawForeground, [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis)
+    }.GetNewClosure())
+}
+
+function Find-Endpoint($items, [string]$id, [string]$name) {
+    $match = @($items | Where-Object { $_.Id -eq $id } | Select-Object -First 1)
+    if ($match.Count -gt 0) { return $match[0] }
+    $match = @($items | Where-Object { $_.Name -eq $name } | Select-Object -First 1)
+    if ($match.Count -gt 0) { return $match[0] }
+    return $null
+}
+
+function Set-Status([string]$Text, [bool]$IsError = $false) {
+    $statusLabel.Text = $Text
+    $statusLabel.ForeColor = if ($IsError) { [System.Drawing.Color]::FromArgb(248, 113, 113) } else { [System.Drawing.Color]::FromArgb(52, 211, 153) }
+}
+
+function Show-MainWindow {
+    $form.ShowInTaskbar = $true
+    $form.Show()
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+    $form.BringToFront()
+}
+
+function Hide-ToTray([bool]$ShowNotice = $true) {
+    $form.ShowInTaskbar = $false
+    $form.Hide()
+    $trayIcon.Visible = $true
+    if ($ShowNotice) {
+        try {
+            $trayIcon.ShowBalloonTip(1600, '音频一键切换', '程序仍在托盘运行。双击图标可打开，右键可切换方案或退出。', [System.Windows.Forms.ToolTipIcon]::Info)
+        } catch { }
+    }
+}
+
+function Refresh-Devices {
+    try {
+        $selectedOutputId = if ($outputCombo.SelectedItem) { $outputCombo.SelectedItem.Id } else { $null }
+        $selectedInputId = if ($inputCombo.SelectedItem) { $inputCombo.SelectedItem.Id } else { $null }
+        $script:Outputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Render))
+        $script:Inputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Capture))
+        $outputCombo.Items.Clear()
+        $inputCombo.Items.Clear()
+        foreach ($item in $script:Outputs) { [void]$outputCombo.Items.Add($item) }
+        foreach ($item in $script:Inputs) { [void]$inputCombo.Items.Add($item) }
+
+        $outputIndex = 0
+        for ($i = 0; $i -lt $script:Outputs.Count; $i++) {
+            if (($selectedOutputId -and $script:Outputs[$i].Id -eq $selectedOutputId) -or (-not $selectedOutputId -and $script:Outputs[$i].IsDefault)) { $outputIndex = $i; break }
+        }
+        $inputIndex = 0
+        for ($i = 0; $i -lt $script:Inputs.Count; $i++) {
+            if (($selectedInputId -and $script:Inputs[$i].Id -eq $selectedInputId) -or (-not $selectedInputId -and $script:Inputs[$i].IsDefault)) { $inputIndex = $i; break }
+        }
+        if ($outputCombo.Items.Count -gt 0) { $outputCombo.SelectedIndex = $outputIndex }
+        if ($inputCombo.Items.Count -gt 0) { $inputCombo.SelectedIndex = $inputIndex }
+
+        $currentOutput = @($script:Outputs | Where-Object IsDefault | Select-Object -First 1)
+        $currentInput = @($script:Inputs | Where-Object IsDefault | Select-Object -First 1)
+        $currentOutputLabel.Text = if ($currentOutput.Count) { $currentOutput[0].Name } else { '未检测到活动设备' }
+        $currentInputLabel.Text = if ($currentInput.Count) { $currentInput[0].Name } else { '未检测到活动设备' }
+        Set-Status "已刷新 · 输出 $($script:Outputs.Count) 个，输入 $($script:Inputs.Count) 个"
+    } catch {
+        Set-Status "刷新失败：$($_.Exception.Message)" $true
+    }
+}
+
+function Switch-Profile($profile) {
+    try {
+        Refresh-Devices
+        $output = Find-Endpoint $script:Outputs $profile.OutputId $profile.OutputName
+        $input = Find-Endpoint $script:Inputs $profile.InputId $profile.InputName
+        $missing = @()
+        if (-not $output) { $missing += "输出：$($profile.OutputName)" }
+        if (-not $input) { $missing += "输入：$($profile.InputName)" }
+        if ($missing.Count) { throw "找不到设备（可能未连接）：$($missing -join '；')" }
+        [AudioSwitchNative.AudioManager]::SetDefault($output.Id)
+        [AudioSwitchNative.AudioManager]::SetDefault($input.Id)
+        Start-Sleep -Milliseconds 150
+        Refresh-Devices
+        Update-TrayMenuState
+        Set-Status "✓ 已切换到「$($profile.Name)」；Windows / Discord / Steam 将使用这组默认设备"
+        $trayIcon.ShowBalloonTip(1800, '音频设备已切换', "$($profile.Name)`n输出：$($output.Name)`n输入：$($input.Name)", 'Info')
+    } catch {
+        Set-Status "切换失败：$($_.Exception.Message)" $true
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '切换失败', 'OK', 'Error') | Out-Null
+    }
+}
+
+function Update-ProfileScroll {
+    if ($null -eq $profilesViewport -or $null -eq $profileScroll) { return }
+    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * 91) - 9 } else { 64 }
+    $profilePanel.Size = New-Object System.Drawing.Size(($profilesViewport.ClientSize.Width - 20), ([Math]::Max($profilesViewport.ClientSize.Height, $contentHeight)))
+    $profileScroll.LargeChange = [Math]::Max(1, $profilesViewport.ClientSize.Height)
+    $profileScroll.Maximum = [Math]::Max(0, $contentHeight - $profilesViewport.ClientSize.Height)
+    $profileScroll.Visible = ($profileScroll.Maximum -gt 0)
+    if ($profileScroll.Value -gt $profileScroll.Maximum) { $profileScroll.Value = $profileScroll.Maximum }
+    $profilePanel.Top = -$profileScroll.Value
+}
+
+function Render-Profiles {
+    $profilePanel.SuspendLayout()
+    $profilePanel.Controls.Clear()
+    if ($null -ne $profilesCountLabel) { $profilesCountLabel.Text = "$($script:Profiles.Count) 个方案" }
+    if ($script:Profiles.Count -eq 0) {
+        $empty = New-Label '还没有方案  ·  在上方选择设备并保存' 9
+        $empty.ForeColor = $colorMuted
+        $empty.Margin = New-Object System.Windows.Forms.Padding(16, 22, 8, 8)
+        [void]$profilePanel.Controls.Add($empty)
+    }
+    foreach ($profile in @($script:Profiles)) {
+        $card = New-Object AudioSwitchNative.AcrylicPanel
+        $cardWidth = [Math]::Max(730, $profilePanel.ClientSize.Width - 8)
+        $card.Size = New-Object System.Drawing.Size($cardWidth, 82)
+        $card.CornerRadius = 12
+        $card.FillColor = [System.Drawing.Color]::FromArgb(205, 22, 32, 48)
+        $card.BorderColor = [System.Drawing.Color]::FromArgb(85, 58, 76, 99)
+        $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 9)
+
+        $statusDot = New-Label '●' 7
+        $statusDot.Location = New-Object System.Drawing.Point(17, 14)
+        $statusDot.ForeColor = $colorAccent
+        $card.Controls.Add($statusDot)
+
+        $name = New-Label $profile.Name 10.5 'Bold'
+        $name.Location = New-Object System.Drawing.Point(34, 11)
+        $card.Controls.Add($name)
+
+        $outputCaption = New-Label '输出' 7.5 'Bold'
+        $outputCaption.ForeColor = $colorMuted
+        $outputCaption.Location = New-Object System.Drawing.Point(18, 48)
+        $card.Controls.Add($outputCaption)
+        $outputValue = New-Label $profile.OutputName 8.2
+        $outputValue.ForeColor = $colorTextSecondary
+        $outputValue.Location = New-Object System.Drawing.Point(56, 46)
+        $outputValue.MaximumSize = New-Object System.Drawing.Size(230, 20)
+        $card.Controls.Add($outputValue)
+
+        $inputCaption = New-Label '输入' 7.5 'Bold'
+        $inputCaption.ForeColor = $colorMuted
+        $inputCaption.Location = New-Object System.Drawing.Point(300, 48)
+        $card.Controls.Add($inputCaption)
+        $inputValue = New-Label $profile.InputName 8.2
+        $inputValue.ForeColor = $colorTextSecondary
+        $inputValue.Location = New-Object System.Drawing.Point(338, 46)
+        $inputValue.MaximumSize = New-Object System.Drawing.Size(220, 20)
+        $card.Controls.Add($inputValue)
+
+        $switchButton = New-Object System.Windows.Forms.Button
+        $switchButton.Text = '切换到此方案'
+        $switchButton.Size = New-Object System.Drawing.Size(112, 36)
+        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 166), 23)
+        $switchButton.FlatStyle = 'Flat'
+        $switchButton.FlatAppearance.BorderSize = 0
+        $switchButton.BackColor = $colorAccent
+        $switchButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
+        $switchButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+        [AudioSwitchNative.WindowEffects]::RoundControl($switchButton, 9)
+        $capturedProfile = $profile
+        $switchButton.Add_Click({ Switch-Profile $capturedProfile }.GetNewClosure())
+        $card.Controls.Add($switchButton)
+
+        $deleteButton = New-Object System.Windows.Forms.Button
+        $deleteButton.Text = '×'
+        $deleteButton.Size = New-Object System.Drawing.Size(36, 36)
+        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 44), 23)
+        $deleteButton.FlatStyle = 'Flat'
+        $deleteButton.FlatAppearance.BorderSize = 0
+        $deleteButton.BackColor = $colorElevated
+        $deleteButton.ForeColor = $colorMuted
+        $deleteButton.Font = New-Object System.Drawing.Font('Segoe UI', 13)
+        [AudioSwitchNative.WindowEffects]::RoundControl($deleteButton, 9)
+        $capturedName = [string]$profile.Name
+        $deleteButton.Add_Click({
+            $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $capturedName })
+            Save-Profiles
+            Render-Profiles
+            Rebuild-TrayMenu
+            Set-Status "已删除方案「$capturedName」"
+        }.GetNewClosure())
+        $card.Controls.Add($deleteButton)
+        [void]$profilePanel.Controls.Add($card)
+    }
+    $profilePanel.ResumeLayout()
+    Update-ProfileScroll
+}
+
+function Get-SystemUsesLightTheme {
+    try {
+        $value = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -ErrorAction Stop).AppsUseLightTheme
+        return ([int]$value -ne 0)
+    } catch {
+        return $true
+    }
+}
+
+function Apply-TrayMenuTheme {
+    $isLight = Get-SystemUsesLightTheme
+    if ($isLight) {
+        $background = [System.Drawing.Color]::FromArgb(250, 250, 252)
+        $text = [System.Drawing.Color]::FromArgb(24, 26, 31)
+        $muted = [System.Drawing.Color]::FromArgb(107, 114, 128)
+        $danger = [System.Drawing.Color]::FromArgb(190, 45, 55)
+    } else {
+        $background = [System.Drawing.Color]::FromArgb(24, 26, 31)
+        $text = [System.Drawing.Color]::FromArgb(239, 241, 245)
+        $muted = [System.Drawing.Color]::FromArgb(145, 151, 163)
+        $danger = [System.Drawing.Color]::FromArgb(255, 112, 122)
+    }
+
+    $newRenderer = [AudioSwitchNative.ModernMenuRenderer]::new([bool]$isLight)
+    $trayMenu.Renderer = $newRenderer
+    $script:TrayMenuRenderer = $newRenderer
+    $trayMenu.BackColor = $background
+    $trayMenu.ForeColor = $text
+    foreach ($menuItem in $trayMenu.Items) {
+        if ($menuItem.Name -eq 'menuHeader' -or $menuItem.Name -eq 'emptyProfiles') {
+            $menuItem.ForeColor = $muted
+        } elseif ($menuItem.Name -eq 'exitApp') {
+            $menuItem.ForeColor = $danger
+        } else {
+            $menuItem.ForeColor = $text
+        }
+    }
+
+}
+
+function Update-TrayMenuState {
+    try {
+        $menuOutputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Render))
+        $menuInputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Capture))
+        $currentName = $null
+        foreach ($menuItem in $trayMenu.Items) {
+            if (-not $menuItem.Name.StartsWith('profile_') -or $null -eq $menuItem.Tag) { continue }
+            $profile = $menuItem.Tag
+            $output = Find-Endpoint $menuOutputs $profile.OutputId $profile.OutputName
+            $input = Find-Endpoint $menuInputs $profile.InputId $profile.InputName
+            $menuItem.Checked = [bool]($output -and $input -and $output.IsDefault -and $input.IsDefault)
+            if ($menuItem.Checked) { $currentName = [string]$profile.Name }
+        }
+        $header = $trayMenu.Items.Find('menuHeader', $false) | Select-Object -First 1
+        if ($header) {
+            $header.Text = if ($currentName) { "AUDIO SWITCH    ·    当前：$currentName" } else { 'AUDIO SWITCH    ·    选择音频方案' }
+        }
+    } catch { }
+}
+
+function Rebuild-TrayMenu {
+    if ($null -eq $trayMenu) { return }
+    $trayMenu.Items.Clear()
+
+    $header = New-Object System.Windows.Forms.ToolStripMenuItem
+    $header.Name = 'menuHeader'
+    $header.Text = 'AUDIO SWITCH    ·    选择音频方案'
+    $header.Enabled = $false
+    $header.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
+    $header.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+    [void]$trayMenu.Items.Add($header)
+    [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+
+    foreach ($profile in @($script:Profiles)) {
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem
+        $item.Name = "profile_$([Guid]::NewGuid().ToString('N'))"
+        $item.Text = [string]$profile.Name
+        $item.Tag = $profile
+        $item.ToolTipText = "输出：$($profile.OutputName)`n输入：$($profile.InputName)"
+        $item.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+        $captured = $profile
+        $item.Add_Click({ Switch-Profile $captured }.GetNewClosure())
+        [void]$trayMenu.Items.Add($item)
+    }
+    if (-not $script:Profiles.Count) {
+        $emptyItem = New-Object System.Windows.Forms.ToolStripMenuItem
+        $emptyItem.Name = 'emptyProfiles'
+        $emptyItem.Text = '还没有保存音频方案'
+        $emptyItem.Enabled = $false
+        $emptyItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+        [void]$trayMenu.Items.Add($emptyItem)
+    }
+
+    [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $showItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $showItem.Name = 'showWindow'
+    $showItem.Text = '打开控制面板'
+    $showItem.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
+    $showItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $showItem.Add_Click({ Show-MainWindow })
+    [void]$trayMenu.Items.Add($showItem)
+
+    $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $refreshItem.Name = 'refreshDevices'
+    $refreshItem.Text = '刷新音频设备'
+    $refreshItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $refreshItem.Add_Click({ Refresh-Devices; Update-TrayMenuState })
+    [void]$trayMenu.Items.Add($refreshItem)
+
+    $startupItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $startupItem.Name = 'startupToggle'
+    $startupItem.Text = '随 Windows 启动'
+    $startupItem.Checked = Test-StartupRegistration
+    $startupItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $startupItem.Add_Click({
+        try {
+            Set-StartupRegistration (-not $startupItem.Checked)
+            $startupItem.Checked = Test-StartupRegistration
+            $script:InitializingSettings = $true
+            $startupCheck.Checked = $startupItem.Checked
+            $script:InitializingSettings = $false
+        } catch { }
+    }.GetNewClosure())
+    [void]$trayMenu.Items.Add($startupItem)
+
+    [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $exitItem.Name = 'exitApp'
+    $exitItem.Text = '退出 Audio Switch'
+    $exitItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $exitItem.Add_Click({ $script:ClosingForReal = $true; $trayIcon.Visible = $false; $form.Close() })
+    [void]$trayMenu.Items.Add($exitItem)
+
+    Apply-TrayMenuTheme
+    Update-TrayMenuState
+}
+
+Load-Settings
+
+$iconPath = Join-Path $PSScriptRoot 'assets\audio-switch-icon-driver.ico'
+try {
+    $appIcon = [System.Drawing.Icon]::new($iconPath)
+    $script:OwnsAppIcon = $true
+} catch {
+    $appIcon = [System.Drawing.SystemIcons]::Application
+    $script:OwnsAppIcon = $false
+}
+
+$colorBackground = [System.Drawing.Color]::FromArgb(11, 18, 32)
+$colorSurface = [System.Drawing.Color]::FromArgb(22, 32, 48)
+$colorElevated = [System.Drawing.Color]::FromArgb(31, 44, 63)
+$colorInput = [System.Drawing.Color]::FromArgb(16, 25, 40)
+$colorBorder = [System.Drawing.Color]::FromArgb(48, 65, 87)
+$colorTextPrimary = [System.Drawing.Color]::FromArgb(244, 247, 251)
+$colorTextSecondary = [System.Drawing.Color]::FromArgb(190, 201, 216)
+$colorMuted = [System.Drawing.Color]::FromArgb(133, 149, 170)
+$colorAccent = [System.Drawing.Color]::FromArgb(89, 232, 159)
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'AUDIO ROUTER'
+$form.ClientSize = New-Object System.Drawing.Size(820, 716)
+$form.MinimumSize = New-Object System.Drawing.Size(836, 700)
+$form.StartPosition = 'CenterScreen'
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+$form.BackColor = $colorBackground
+$form.ForeColor = $colorTextPrimary
+$form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$form.Icon = $appIcon
+
+$brandTitle = New-Label 'AUDIO ROUTER' 21 'Bold'
+$brandTitle.Location = New-Object System.Drawing.Point(22, 25)
+$brandTitle.ForeColor = $colorTextPrimary
+$form.Controls.Add($brandTitle)
+
+$refreshButton = New-Object System.Windows.Forms.Button
+$refreshButton.Text = '刷新设备'
+$refreshButton.Size = New-Object System.Drawing.Size(124, 36)
+$refreshButton.Location = New-Object System.Drawing.Point(672, 25)
+$refreshButton.Anchor = 'Top,Right'
+$refreshButton.FlatStyle = 'Flat'
+$refreshButton.FlatAppearance.BorderColor = $colorBorder
+$refreshButton.FlatAppearance.BorderSize = 1
+$refreshButton.BackColor = $colorSurface
+$refreshButton.ForeColor = $colorTextPrimary
+$refreshButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+[AudioSwitchNative.WindowEffects]::RoundControl($refreshButton, 9)
+$refreshButton.Add_Click({ Refresh-Devices })
+$form.Controls.Add($refreshButton)
+
+$currentPanel = New-Object AudioSwitchNative.AcrylicPanel
+$currentPanel.Location = New-Object System.Drawing.Point(24, 82)
+$currentPanel.Size = New-Object System.Drawing.Size(772, 92)
+$currentPanel.Anchor = 'Top,Left,Right'
+$currentPanel.CornerRadius = 14
+$currentPanel.FillColor = [System.Drawing.Color]::FromArgb(196, 22, 32, 48)
+$currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 65, 84, 108)
+$form.Controls.Add($currentPanel)
+$now = New-Label '当前正在使用' 8 'Bold'
+$now.Location = New-Object System.Drawing.Point(16, 10)
+$now.ForeColor = $colorAccent
+$currentPanel.Controls.Add($now)
+$divider = New-Object System.Windows.Forms.Panel
+$divider.Location = New-Object System.Drawing.Point(385, 35)
+$divider.Size = New-Object System.Drawing.Size(1, 42)
+$divider.BackColor = $colorBorder
+$currentPanel.Controls.Add($divider)
+$outCaption = New-Label '输出设备' 7.5 'Bold'
+$outCaption.Location = New-Object System.Drawing.Point(16, 38)
+$outCaption.ForeColor = $colorMuted
+$currentPanel.Controls.Add($outCaption)
+$currentOutputLabel = New-Label '读取中…' 9.5 'Bold'
+$currentOutputLabel.Location = New-Object System.Drawing.Point(16, 58)
+$currentOutputLabel.ForeColor = $colorTextPrimary
+$currentOutputLabel.MaximumSize = New-Object System.Drawing.Size(345, 24)
+$currentPanel.Controls.Add($currentOutputLabel)
+$inCaption = New-Label '输入设备' 7.5 'Bold'
+$inCaption.Location = New-Object System.Drawing.Point(406, 38)
+$inCaption.ForeColor = $colorMuted
+$currentPanel.Controls.Add($inCaption)
+$currentInputLabel = New-Label '读取中…' 9.5 'Bold'
+$currentInputLabel.Location = New-Object System.Drawing.Point(406, 58)
+$currentInputLabel.ForeColor = $colorTextPrimary
+$currentInputLabel.MaximumSize = New-Object System.Drawing.Size(345, 24)
+$currentPanel.Controls.Add($currentInputLabel)
+
+$createLabel = New-Label '新建或更新方案' 10.5 'Bold'
+$createLabel.Location = New-Object System.Drawing.Point(24, 192)
+$createLabel.ForeColor = $colorTextPrimary
+$form.Controls.Add($createLabel)
+$createHelp = New-Label '同名方案会自动更新' 7.5
+$createHelp.Location = New-Object System.Drawing.Point(154, 196)
+$createHelp.ForeColor = $colorMuted
+$form.Controls.Add($createHelp)
+
+$createPanel = New-Object AudioSwitchNative.AcrylicPanel
+$createPanel.Location = New-Object System.Drawing.Point(24, 220)
+$createPanel.Size = New-Object System.Drawing.Size(772, 76)
+$createPanel.Anchor = 'Top,Left,Right'
+$createPanel.CornerRadius = 14
+$createPanel.FillColor = [System.Drawing.Color]::FromArgb(196, 22, 32, 48)
+$createPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 65, 84, 108)
+$form.Controls.Add($createPanel)
+
+$nameHint = New-Label '方案名称' 7.5 'Bold'
+$nameHint.Location = New-Object System.Drawing.Point(16, 11)
+$nameHint.ForeColor = $colorMuted
+$createPanel.Controls.Add($nameHint)
+$outHint = New-Label '输出设备  ·  耳机 / 音箱' 7.5 'Bold'
+$outHint.Location = New-Object System.Drawing.Point(188, 11)
+$outHint.ForeColor = $colorMuted
+$createPanel.Controls.Add($outHint)
+$inHint = New-Label '输入设备  ·  麦克风' 7.5 'Bold'
+$inHint.Location = New-Object System.Drawing.Point(420, 11)
+$inHint.ForeColor = $colorMuted
+$createPanel.Controls.Add($inHint)
+
+$profileNameBox = New-Object AudioSwitchNative.ModernTextBox
+$profileNameBox.Location = New-Object System.Drawing.Point(16, 34)
+$profileNameBox.Size = New-Object System.Drawing.Size(160, 31)
+$profileNameBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$profileNameBox.ForeColor = $colorTextPrimary
+$profileNameBox.FieldColor = $colorInput
+$profileNameBox.BorderColor = $colorBorder
+$profileNameBox.ActiveBorderColor = $colorAccent
+$createPanel.Controls.Add($profileNameBox)
+
+$outputCombo = New-Object AudioSwitchNative.ModernComboBox
+$outputCombo.Location = New-Object System.Drawing.Point(188, 34)
+$outputCombo.Size = New-Object System.Drawing.Size(220, 31)
+$outputCombo.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
+$outputCombo.ForeColor = $colorTextPrimary
+$outputCombo.FieldColor = $colorInput
+$outputCombo.BorderColor = $colorBorder
+$outputCombo.ActiveBorderColor = $colorAccent
+$createPanel.Controls.Add($outputCombo)
+
+$inputCombo = New-Object AudioSwitchNative.ModernComboBox
+$inputCombo.Location = New-Object System.Drawing.Point(420, 34)
+$inputCombo.Size = New-Object System.Drawing.Size(220, 31)
+$inputCombo.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
+$inputCombo.ForeColor = $colorTextPrimary
+$inputCombo.FieldColor = $colorInput
+$inputCombo.BorderColor = $colorBorder
+$inputCombo.ActiveBorderColor = $colorAccent
+$createPanel.Controls.Add($inputCombo)
+
+$saveButton = New-Object System.Windows.Forms.Button
+$saveButton.Text = '保存方案'
+$saveButton.Size = New-Object System.Drawing.Size(104, 31)
+$saveButton.Location = New-Object System.Drawing.Point(652, 33)
+$saveButton.FlatStyle = 'Flat'
+$saveButton.FlatAppearance.BorderSize = 0
+$saveButton.BackColor = $colorAccent
+$saveButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
+$saveButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+[AudioSwitchNative.WindowEffects]::RoundControl($saveButton, 9)
+$saveButton.Add_Click({
+    $name = $profileNameBox.Text.Trim()
+    if (-not $name) { Set-Status '请给方案起个名字，例如「耳机」或「音箱」' $true; return }
+    if (-not $outputCombo.SelectedItem -or -not $inputCombo.SelectedItem) { Set-Status '请同时选择输出和输入设备' $true; return }
+    $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $name })
+    $script:Profiles += [PSCustomObject]@{
+        Name = $name
+        OutputId = $outputCombo.SelectedItem.Id
+        OutputName = $outputCombo.SelectedItem.Name
+        InputId = $inputCombo.SelectedItem.Id
+        InputName = $inputCombo.SelectedItem.Name
+    }
+    Save-Profiles
+    Render-Profiles
+    Rebuild-TrayMenu
+    $profileNameBox.Clear()
+    Set-Status "已保存方案「$name」"
+})
+$createPanel.Controls.Add($saveButton)
+
+$settingsPanel = New-Object AudioSwitchNative.AcrylicPanel
+$settingsPanel.Location = New-Object System.Drawing.Point(24, 636)
+$settingsPanel.Size = New-Object System.Drawing.Size(772, 46)
+$settingsPanel.Anchor = 'Bottom,Left,Right'
+$settingsPanel.CornerRadius = 12
+$settingsPanel.FillColor = [System.Drawing.Color]::FromArgb(180, 18, 28, 43)
+$settingsPanel.BorderColor = [System.Drawing.Color]::FromArgb(78, 58, 76, 99)
+$form.Controls.Add($settingsPanel)
+$settingsCaption = New-Label '运行设置' 7.5 'Bold'
+$settingsCaption.Location = New-Object System.Drawing.Point(16, 15)
+$settingsCaption.ForeColor = $colorMuted
+$settingsPanel.Controls.Add($settingsCaption)
+
+$startupCheck = New-Object AudioSwitchNative.ModernCheckBox
+$startupCheck.Text = '随 Windows 启动'
+$startupCheck.AutoSize = $false
+$startupCheck.Size = New-Object System.Drawing.Size(142, 24)
+$startupCheck.Location = New-Object System.Drawing.Point(94, 11)
+$startupCheck.ForeColor = $colorTextSecondary
+$startupCheck.Checked = Test-StartupRegistration
+$startupCheck.Add_CheckedChanged({
+    if ($script:InitializingSettings) { return }
+    try {
+        Set-StartupRegistration $startupCheck.Checked
+        if ($startupCheck.Checked) { Set-Status '已开启随 Windows 启动；开机时会直接进入托盘' }
+        else { Set-Status '已关闭随 Windows 启动' }
+    } catch {
+        $script:InitializingSettings = $true
+        $startupCheck.Checked = -not $startupCheck.Checked
+        $script:InitializingSettings = $false
+        Set-Status "修改开机启动失败：$($_.Exception.Message)" $true
+    }
+})
+$settingsPanel.Controls.Add($startupCheck)
+
+$startMinimizedCheck = New-Object AudioSwitchNative.ModernCheckBox
+$startMinimizedCheck.Text = '启动后直接隐藏到托盘'
+$startMinimizedCheck.AutoSize = $false
+$startMinimizedCheck.Size = New-Object System.Drawing.Size(190, 24)
+$startMinimizedCheck.Location = New-Object System.Drawing.Point(250, 11)
+$startMinimizedCheck.ForeColor = $colorTextSecondary
+$startMinimizedCheck.Checked = [bool]$script:Settings.StartMinimized
+$startMinimizedCheck.Add_CheckedChanged({
+    if ($script:InitializingSettings) { return }
+    $script:Settings.StartMinimized = [bool]$startMinimizedCheck.Checked
+    Save-Settings
+    if ($startMinimizedCheck.Checked) { Set-Status '已开启：以后启动后将直接进入托盘' }
+    else { Set-Status '已关闭启动时隐藏' }
+})
+$settingsPanel.Controls.Add($startMinimizedCheck)
+$script:InitializingSettings = $false
+
+$savedLabel = New-Label '我的音频方案' 10.5 'Bold'
+$savedLabel.Location = New-Object System.Drawing.Point(24, 318)
+$savedLabel.ForeColor = $colorTextPrimary
+$form.Controls.Add($savedLabel)
+$profilesCountLabel = New-Label '0 个方案' 7.5
+$profilesCountLabel.Location = New-Object System.Drawing.Point(730, 322)
+$profilesCountLabel.Anchor = 'Top,Right'
+$profilesCountLabel.ForeColor = $colorMuted
+$form.Controls.Add($profilesCountLabel)
+
+$profilesViewport = New-Object System.Windows.Forms.Panel
+$profilesViewport.Location = New-Object System.Drawing.Point(24, 346)
+$profilesViewport.Size = New-Object System.Drawing.Size(772, 210)
+$profilesViewport.Anchor = 'Top,Bottom,Left,Right'
+$profilesViewport.BackColor = $colorBackground
+$form.Controls.Add($profilesViewport)
+
+$profilePanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$profilePanel.Location = New-Object System.Drawing.Point(0, 0)
+$profilePanel.Size = New-Object System.Drawing.Size(752, 210)
+$profilePanel.AutoScroll = $false
+$profilePanel.FlowDirection = 'TopDown'
+$profilePanel.WrapContents = $false
+$profilePanel.BackColor = $colorBackground
+$profilesViewport.Controls.Add($profilePanel)
+
+$profileScroll = New-Object AudioSwitchNative.ModernVScrollBar
+$profileScroll.Location = New-Object System.Drawing.Point(758, 4)
+$profileScroll.Size = New-Object System.Drawing.Size(10, 202)
+$profileScroll.Anchor = 'Top,Bottom,Right'
+$profileScroll.Visible = $false
+$profileScroll.Add_ValueChanged({ $profilePanel.Top = -$profileScroll.Value })
+$profilesViewport.Controls.Add($profileScroll)
+$profilesViewport.Add_Resize({
+    $profileScroll.Location = New-Object System.Drawing.Point(($profilesViewport.ClientSize.Width - 14), 4)
+    $profileScroll.Height = [Math]::Max(30, $profilesViewport.ClientSize.Height - 8)
+    Update-ProfileScroll
+})
+$profilePanel.Add_MouseWheel({
+    param($sender, $eventArgs)
+    $profileScroll.Value = $profileScroll.Value - [Math]::Sign($eventArgs.Delta) * 48
+})
+$profilesViewport.Add_MouseWheel({
+    param($sender, $eventArgs)
+    $profileScroll.Value = $profileScroll.Value - [Math]::Sign($eventArgs.Delta) * 48
+})
+$profilesViewport.Add_MouseEnter({ $profilesViewport.Focus() })
+
+$noticePanel = New-Object AudioSwitchNative.AcrylicPanel
+$noticePanel.Location = New-Object System.Drawing.Point(24, 568)
+$noticePanel.Size = New-Object System.Drawing.Size(772, 54)
+$noticePanel.Anchor = 'Bottom,Left,Right'
+$noticePanel.CornerRadius = 12
+$noticePanel.FillColor = [System.Drawing.Color]::FromArgb(188, 13, 38, 57)
+$noticePanel.BorderColor = [System.Drawing.Color]::FromArgb(105, 40, 112, 148)
+$form.Controls.Add($noticePanel)
+$notice = New-Label '使用提示  ·  请在 Discord 与 Steam 中，将输入和输出设备设为 Default / 默认' 8.2 'Bold'
+$notice.Location = New-Object System.Drawing.Point(16, 8)
+$notice.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$noticePanel.Controls.Add($notice)
+$notice2 = New-Label '通话中若没有立即更新，退出并重新进入语音频道即可。' 7.8
+$notice2.Location = New-Object System.Drawing.Point(16, 30)
+$notice2.ForeColor = [System.Drawing.Color]::FromArgb(158, 190, 211)
+$noticePanel.Controls.Add($notice2)
+
+$statusLabel = New-Label '准备就绪' 8
+$statusLabel.Location = New-Object System.Drawing.Point(500, 15)
+$statusLabel.Anchor = 'Top,Right'
+$statusLabel.ForeColor = $colorAccent
+$statusLabel.MaximumSize = New-Object System.Drawing.Size(250, 20)
+$settingsPanel.Controls.Add($statusLabel)
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$trayMenu.Padding = New-Object System.Windows.Forms.Padding(6)
+$trayMenu.MinimumSize = New-Object System.Drawing.Size(250, 0)
+$trayMenu.ShowImageMargin = $false
+$trayMenu.ShowCheckMargin = $true
+$trayMenu.DropShadowEnabled = $true
+$trayMenu.Add_Opening({
+    Apply-TrayMenuTheme
+    Update-TrayMenuState
+    $startupMenuItem = $trayMenu.Items.Find('startupToggle', $false) | Select-Object -First 1
+    if ($startupMenuItem) { $startupMenuItem.Checked = Test-StartupRegistration }
+})
+$trayIcon = New-Object System.Windows.Forms.NotifyIcon
+$trayIcon.Text = '音频一键切换'
+$trayIcon.Icon = $appIcon
+$trayIcon.ContextMenuStrip = $trayMenu
+$trayIcon.Visible = $true
+$trayIcon.Add_DoubleClick({ Show-MainWindow })
+
+$form.Add_FormClosing({
+    param($sender, $eventArgs)
+    if (-not $script:ClosingForReal -and $eventArgs.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) {
+        $eventArgs.Cancel = $true
+        Hide-ToTray $true
+    }
+})
+$form.Add_Resize({
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        Hide-ToTray $false
+    }
+})
+$form.Add_Shown({
+    [AudioSwitchNative.WindowEffects]::EnableAcrylic($form.Handle, $true)
+    if ($script:StartHidden -or [bool]$script:Settings.StartMinimized) {
+        $script:StartHidden = $false
+        Hide-ToTray $false
+    }
+})
+$form.Add_FormClosed({
+    $trayIcon.Visible = $false
+    $trayIcon.Dispose()
+    if ($script:OwnsAppIcon) { $appIcon.Dispose() }
+})
+
+Load-Profiles
+Render-Profiles
+Rebuild-TrayMenu
+Refresh-Devices
+if (-not [string]::IsNullOrWhiteSpace($UiPreviewPath)) {
+    $script:StartHidden = $false
+    $script:Settings.StartMinimized = $false
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.Location = New-Object System.Drawing.Point(-32000, -32000)
+    $form.ShowInTaskbar = $false
+    $form.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    $form.PerformLayout()
+    $preview = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
+    $form.DrawToBitmap($preview, (New-Object System.Drawing.Rectangle(0, 0, $form.ClientSize.Width, $form.ClientSize.Height)))
+    $preview.Save($UiPreviewPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    $preview.Dispose()
+    $form.Hide()
+    $trayIcon.Visible = $false
+    $trayIcon.Dispose()
+    if ($script:OwnsAppIcon) { $appIcon.Dispose() }
+    $form.Dispose()
+    exit 0
+}
+[System.Windows.Forms.Application]::Run($form)
