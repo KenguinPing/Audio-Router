@@ -6,7 +6,9 @@ param(
     [string]$UiPreviewPath,
     [int]$UiPreviewWidth,
     [int]$UiPreviewHeight,
-    [string]$HotkeyPreviewPath
+    [string]$HotkeyPreviewPath,
+    [string]$TrayMenuPreviewPath,
+    [switch]$TrayMenuPreviewDark
 )
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -238,9 +240,9 @@ namespace AudioSwitchNative
     {
         readonly bool light;
         public ModernMenuColorTable(bool lightMode) { light = lightMode; UseSystemColors = false; }
-        Color Background { get { return light ? Color.FromArgb(250, 250, 252) : Color.FromArgb(24, 26, 31); } }
-        Color Selected { get { return light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(43, 47, 55); } }
-        Color Border { get { return light ? Color.FromArgb(210, 214, 221) : Color.FromArgb(60, 64, 74); } }
+        Color Background { get { return light ? Color.FromArgb(248, 250, 252) : Color.FromArgb(25, 32, 41); } }
+        Color Selected { get { return light ? Color.FromArgb(232, 237, 242) : Color.FromArgb(46, 57, 69); } }
+        Color Border { get { return light ? Color.FromArgb(203, 211, 221) : Color.FromArgb(76, 91, 106); } }
         public override Color ToolStripDropDownBackground { get { return Background; } }
         public override Color ImageMarginGradientBegin { get { return Background; } }
         public override Color ImageMarginGradientMiddle { get { return Background; } }
@@ -260,17 +262,68 @@ namespace AudioSwitchNative
     public sealed class ModernMenuRenderer : ToolStripProfessionalRenderer
     {
         readonly bool light;
-        readonly Color accent = Color.FromArgb(99, 255, 87);
+        readonly Color accent = Color.FromArgb(104, 231, 179);
         public ModernMenuRenderer(bool lightMode) : base(new ModernMenuColorTable(lightMode))
         {
             light = lightMode;
             RoundedEdges = false;
         }
 
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            var top = light ? Color.FromArgb(253, 254, 255) : Color.FromArgb(39, 48, 58);
+            var bottom = light ? Color.FromArgb(242, 246, 249) : Color.FromArgb(21, 28, 37);
+            using (var gradient = new LinearGradientBrush(e.AffectedBounds, top, bottom, LinearGradientMode.Vertical))
+                e.Graphics.FillRectangle(gradient, e.AffectedBounds);
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (!e.Item.Selected || !e.Item.Enabled) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(5, 2, Math.Max(1, e.Item.Width - 10), Math.Max(1, e.Item.Height - 4));
+            using (var path = ModernTextBox.RoundedRect(rect, 8))
+            using (var fill = new SolidBrush(light ? Color.FromArgb(229, 235, 241) : Color.FromArgb(50, 62, 74)))
+            using (var border = new Pen(light ? Color.FromArgb(207, 217, 227) : Color.FromArgb(91, 108, 124)))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            // WinForms positions menu glyphs by the font baseline, which makes
+            // Chinese text look slightly top-heavy. Draw against the full item
+            // height so both the label and shortcut are optically centered.
+            var rect = e.TextRectangle;
+            rect.Y = 1;
+            rect.Height = Math.Max(1, e.Item.Height - 2);
+            var flags = (e.TextFormat & ~TextFormatFlags.Bottom) |
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                        TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, rect, e.TextColor, flags);
+        }
+
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+        {
+            // Keep the check area on the same acrylic gradient as the menu body.
+        }
+
         protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
         {
-            using (var pen = new Pen(light ? Color.FromArgb(210, 214, 221) : Color.FromArgb(60, 64, 74)))
-                e.Graphics.DrawRectangle(pen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(1, 1, Math.Max(1, e.ToolStrip.Width - 3), Math.Max(1, e.ToolStrip.Height - 3));
+            using (var path = ModernTextBox.RoundedRect(rect, 13))
+            using (var pen = new Pen(light ? Color.FromArgb(197, 207, 218) : Color.FromArgb(82, 98, 114)))
+                e.Graphics.DrawPath(pen, path);
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            var y = e.Item.Height / 2;
+            using (var pen = new Pen(light ? Color.FromArgb(210, 218, 227) : Color.FromArgb(65, 79, 94)))
+                e.Graphics.DrawLine(pen, 18, y, e.Item.Width - 18, y);
         }
 
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
@@ -292,8 +345,8 @@ namespace AudioSwitchNative
         public AcrylicPanel()
         {
             CornerRadius = 14;
-            FillColor = Color.FromArgb(205, 22, 32, 48);
-            BorderColor = Color.FromArgb(95, 72, 91, 116);
+            FillColor = Color.FromArgb(165, 43, 54, 65);
+            BorderColor = Color.FromArgb(90, 89, 105, 121);
             BackColor = Color.Transparent;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
@@ -356,9 +409,9 @@ namespace AudioSwitchNative
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
-            FieldColor = Color.FromArgb(16, 25, 40);
-            BorderColor = Color.FromArgb(55, 73, 96);
-            ActiveBorderColor = Color.FromArgb(89, 232, 159);
+            FieldColor = Color.FromArgb(27, 35, 44);
+            BorderColor = Color.FromArgb(70, 85, 101);
+            ActiveBorderColor = Color.FromArgb(104, 231, 179);
             editor.BorderStyle = BorderStyle.None;
             editor.BackColor = FieldColor;
             editor.ForeColor = Color.FromArgb(244, 247, 251);
@@ -464,9 +517,9 @@ namespace AudioSwitchNative
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
                      ControlStyles.Selectable, true);
             BackColor = Color.Transparent;
-            FieldColor = Color.FromArgb(16, 25, 40);
-            BorderColor = Color.FromArgb(55, 73, 96);
-            ActiveBorderColor = Color.FromArgb(89, 232, 159);
+            FieldColor = Color.FromArgb(27, 35, 44);
+            BorderColor = Color.FromArgb(70, 85, 101);
+            ActiveBorderColor = Color.FromArgb(104, 231, 179);
             ForeColor = Color.FromArgb(244, 247, 251);
             Height = 31;
             Cursor = Cursors.Hand;
@@ -496,11 +549,12 @@ namespace AudioSwitchNative
             menu.Renderer = new ModernMenuRenderer(false);
             menu.ShowImageMargin = false;
             menu.ShowCheckMargin = false;
-            menu.BackColor = Color.FromArgb(24, 26, 31);
+            menu.BackColor = Color.FromArgb(25, 32, 41);
             menu.ForeColor = Color.FromArgb(239, 241, 245);
             menu.Font = Font;
             menu.Padding = new Padding(5);
             menu.MinimumSize = new Size(Width, 0);
+            menu.Opacity = 0.985;
             for (int i = 0; i < items.Count; i++)
             {
                 int index = i;
@@ -562,8 +616,8 @@ namespace AudioSwitchNative
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             var box = new Rectangle(1, Math.Max(1, (Height - 15) / 2), 15, 15);
             using (var path = ModernTextBox.RoundedRect(box, 4))
-            using (var fill = new SolidBrush(Checked ? Color.FromArgb(89, 232, 159) : Color.FromArgb(16, 25, 40)))
-            using (var border = new Pen(Checked ? Color.FromArgb(89, 232, 159) : Color.FromArgb(79, 98, 123)))
+            using (var fill = new SolidBrush(Checked ? Color.FromArgb(104, 231, 179) : Color.FromArgb(27, 35, 44)))
+            using (var border = new Pen(Checked ? Color.FromArgb(104, 231, 179) : Color.FromArgb(82, 98, 114)))
             {
                 e.Graphics.FillPath(fill, path);
                 e.Graphics.DrawPath(border, path);
@@ -592,6 +646,8 @@ namespace AudioSwitchNative
         public Color BorderColor { get; set; }
         public int BorderWidth { get; set; }
         public int CornerRadius { get; set; }
+        public bool DrawCloseGlyph { get; set; }
+        public Color GlyphColor { get; set; }
 
         public ModernButton()
         {
@@ -599,12 +655,14 @@ namespace AudioSwitchNative
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
                      ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             BackColor = Color.Transparent;
-            FillColor = Color.FromArgb(22, 32, 48);
-            HoverFillColor = Color.FromArgb(31, 44, 63);
-            PressedFillColor = Color.FromArgb(16, 25, 40);
-            BorderColor = Color.FromArgb(48, 65, 87);
+            FillColor = Color.FromArgb(37, 47, 57);
+            HoverFillColor = Color.FromArgb(48, 59, 70);
+            PressedFillColor = Color.FromArgb(27, 35, 44);
+            BorderColor = Color.FromArgb(70, 85, 101);
             BorderWidth = 1;
             CornerRadius = 9;
+            DrawCloseGlyph = false;
+            GlyphColor = Color.White;
             FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0;
             UseVisualStyleBackColor = false;
@@ -634,10 +692,26 @@ namespace AudioSwitchNative
                         e.Graphics.DrawPath(border, path);
                 }
             }
-            var textColor = Enabled ? ForeColor : Color.FromArgb(120, ForeColor);
-            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, textColor,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            if (DrawCloseGlyph)
+            {
+                var glyphColor = Enabled ? GlyphColor : Color.FromArgb(120, GlyphColor);
+                float centerX = ClientRectangle.Left + ClientRectangle.Width / 2f;
+                float centerY = ClientRectangle.Top + ClientRectangle.Height / 2f;
+                using (var pen = new Pen(glyphColor, 1.8f))
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    e.Graphics.DrawLine(pen, centerX - 3.2f, centerY - 3.2f, centerX + 3.2f, centerY + 3.2f);
+                    e.Graphics.DrawLine(pen, centerX + 3.2f, centerY - 3.2f, centerX - 3.2f, centerY + 3.2f);
+                }
+            }
+            else
+            {
+                var textColor = Enabled ? ForeColor : Color.FromArgb(120, ForeColor);
+                TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, textColor,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            }
         }
     }
 
@@ -981,6 +1055,9 @@ $script:Settings = [PSCustomObject]@{ StartMinimized = $false }
 $script:StartHidden = [bool]$Minimized
 $script:TrayMenuRenderer = $null
 $script:HotkeyManager = $null
+$script:TrayHeaderPanel = $null
+$script:TrayHeaderBrand = $null
+$script:TrayCurrentLabel = $null
 
 if (-not (Test-Path $script:AppDir)) { New-Item -ItemType Directory -Path $script:AppDir -Force | Out-Null }
 
@@ -1196,6 +1273,7 @@ function Show-HotkeyEditor($profile, [string]$PreviewPath) {
     $dialog.ShowInTaskbar = $false
     $dialog.StartPosition = 'CenterParent'
     $dialog.BackColor = $colorBackground
+    $dialog.Opacity = 0.985
     $dialog.ForeColor = $colorTextPrimary
     $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
     $dialog.Icon = $appIcon
@@ -1213,8 +1291,8 @@ function Show-HotkeyEditor($profile, [string]$PreviewPath) {
     $capturePanel.Location = New-Object System.Drawing.Point(24, 84)
     $capturePanel.Size = New-Object System.Drawing.Size(422, 68)
     $capturePanel.CornerRadius = 12
-    $capturePanel.FillColor = [System.Drawing.Color]::FromArgb(205, 16, 25, 40)
-    $capturePanel.BorderColor = [System.Drawing.Color]::FromArgb(105, 61, 89, 116)
+    $capturePanel.FillColor = [System.Drawing.Color]::FromArgb(162, 32, 42, 52)
+    $capturePanel.BorderColor = [System.Drawing.Color]::FromArgb(92, 86, 104, 121)
     $dialog.Controls.Add($capturePanel)
     $captureCaption = New-Label '当前组合' 7.5 'Bold'
     $captureCaption.Location = New-Object System.Drawing.Point(16, 10)
@@ -1237,16 +1315,17 @@ function Show-HotkeyEditor($profile, [string]$PreviewPath) {
     $validation.ForeColor = [System.Drawing.Color]::FromArgb(147, 197, 253)
     $dialog.Controls.Add($validation)
 
-    $saveHotkeyButton = New-Object System.Windows.Forms.Button
+    $saveHotkeyButton = New-Object AudioSwitchNative.ModernButton
     $saveHotkeyButton.Text = '保存快捷键'
     $saveHotkeyButton.Size = New-Object System.Drawing.Size(118, 34)
     $saveHotkeyButton.Location = New-Object System.Drawing.Point(328, 198)
-    $saveHotkeyButton.FlatStyle = 'Flat'
-    $saveHotkeyButton.FlatAppearance.BorderSize = 0
-    $saveHotkeyButton.BackColor = $colorAccent
+    $saveHotkeyButton.FillColor = $colorAccent
+    $saveHotkeyButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
+    $saveHotkeyButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
+    $saveHotkeyButton.BorderWidth = 0
+    $saveHotkeyButton.CornerRadius = 9
     $saveHotkeyButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
     $saveHotkeyButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
-    [AudioSwitchNative.WindowEffects]::RoundControl($saveHotkeyButton, 9)
     $dialog.Controls.Add($saveHotkeyButton)
 
     $clearHotkeyButton = New-Object AudioSwitchNative.ModernButton
@@ -1401,13 +1480,19 @@ function Update-ResponsiveLayout {
 
 function Update-ProfileScroll {
     if ($null -eq $profilesViewport -or $null -eq $profileScroll) { return }
-    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * 105) - 9 } else { 64 }
+    $cardHeight = Get-ProfileCardHeight
+    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * ($cardHeight + 9)) - 9 } else { 64 }
     $profilePanel.Size = New-Object System.Drawing.Size(($profilesViewport.ClientSize.Width - 20), ([Math]::Max($profilesViewport.ClientSize.Height, $contentHeight)))
     $profileScroll.LargeChange = [Math]::Max(1, $profilesViewport.ClientSize.Height)
     $profileScroll.Maximum = [Math]::Max(0, $contentHeight - $profilesViewport.ClientSize.Height)
     $profileScroll.Visible = ($profileScroll.Maximum -gt 0)
     if ($profileScroll.Value -gt $profileScroll.Maximum) { $profileScroll.Value = $profileScroll.Maximum }
     $profilePanel.Top = -$profileScroll.Value
+}
+
+function Get-ProfileCardHeight {
+    # Keep each profile visually compact instead of stretching it with the window.
+    return 104
 }
 
 function Render-Profiles {
@@ -1420,32 +1505,39 @@ function Render-Profiles {
         $empty.Margin = New-Object System.Windows.Forms.Padding(16, 22, 8, 8)
         [void]$profilePanel.Controls.Add($empty)
     }
+    $cardHeight = Get-ProfileCardHeight
     foreach ($profile in @($script:Profiles)) {
         $card = New-Object AudioSwitchNative.AcrylicPanel
         $cardWidth = [Math]::Max(730, $profilePanel.ClientSize.Width - 8)
         $actionLeft = $cardWidth - 236
         $inputStart = 20 + [Math]::Floor(($actionLeft - 32) / 2)
-        $card.Size = New-Object System.Drawing.Size($cardWidth, 96)
+        $card.Size = New-Object System.Drawing.Size($cardWidth, $cardHeight)
         $card.CornerRadius = 12
-        $card.FillColor = [System.Drawing.Color]::FromArgb(205, 22, 32, 48)
-        $card.BorderColor = [System.Drawing.Color]::FromArgb(85, 58, 76, 99)
+        $card.FillColor = [System.Drawing.Color]::FromArgb(164, 43, 54, 65)
+        $card.BorderColor = [System.Drawing.Color]::FromArgb(82, 79, 95, 111)
         $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 9)
 
         $statusDot = New-Label '●' 7
-        $statusDot.Location = New-Object System.Drawing.Point(18, 16)
+        $statusDot.Location = New-Object System.Drawing.Point(18, 17)
         $statusDot.ForeColor = $colorAccent
         $card.Controls.Add($statusDot)
 
         $name = New-Label $profile.Name 10.5 'Bold'
-        $name.Location = New-Object System.Drawing.Point(35, 13)
+        $name.Location = New-Object System.Drawing.Point(35, 14)
         $name.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(240, $actionLeft - 70)), 24)
         $card.Controls.Add($name)
 
         $actionDivider = New-Object System.Windows.Forms.Panel
-        $actionDivider.Location = New-Object System.Drawing.Point(($cardWidth - 236), 12)
-        $actionDivider.Size = New-Object System.Drawing.Size(1, 68)
-        $actionDivider.BackColor = $colorBorder
+        $actionDivider.Location = New-Object System.Drawing.Point(($cardWidth - 236), 11)
+        $actionDivider.Size = New-Object System.Drawing.Size(1, ($cardHeight - 22))
+        $actionDivider.BackColor = $colorDivider
         $card.Controls.Add($actionDivider)
+
+        $detailDivider = New-Object System.Windows.Forms.Panel
+        $detailDivider.Location = New-Object System.Drawing.Point(20, 42)
+        $detailDivider.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - 40)), 1)
+        $detailDivider.BackColor = $colorDivider
+        $card.Controls.Add($detailDivider)
 
         $hotkeyButton = New-Object AudioSwitchNative.ModernButton
         $hotkeyButton.Text = if ([int]$profile.HotkeyKey -gt 0) {
@@ -1453,7 +1545,7 @@ function Render-Profiles {
         } else {
             '快捷键  ·  点击设置'
         }
-        $hotkeyButton.Size = New-Object System.Drawing.Size(200, 29)
+        $hotkeyButton.Size = New-Object System.Drawing.Size(200, 30)
         $hotkeyButton.Location = New-Object System.Drawing.Point(($cardWidth - 218), 10)
         $hotkeyButton.FillColor = $colorInput
         $hotkeyButton.HoverFillColor = $colorElevated
@@ -1461,60 +1553,64 @@ function Render-Profiles {
         $hotkeyButton.BorderColor = $colorBorder
         $hotkeyButton.CornerRadius = 8
         $hotkeyButton.ForeColor = if ([int]$profile.HotkeyKey -gt 0) { $colorAccent } else { $colorMuted }
-        $hotkeyButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]7.6, [System.Drawing.FontStyle]::Regular)
+        $hotkeyButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8, [System.Drawing.FontStyle]::Regular)
         $capturedHotkeyProfile = $profile
         $hotkeyButton.Add_Click({ Show-HotkeyEditor $capturedHotkeyProfile }.GetNewClosure())
         $card.Controls.Add($hotkeyButton)
 
-        $outputCaption = New-Label 'OUT' 7.5 'Bold'
+        $outputCaption = New-Label 'OUT' 8 'Bold'
         $outputCaption.ForeColor = $colorAccent
-        $outputCaption.Location = New-Object System.Drawing.Point(20, 59)
+        $outputCaption.Location = New-Object System.Drawing.Point(20, 51)
         $card.Controls.Add($outputCaption)
-        $outputValue = New-Label $profile.OutputName 8.2
+        $outputValue = New-Label $profile.OutputName 8.4
         $outputValue.ForeColor = $colorTextSecondary
-        $outputValue.Location = New-Object System.Drawing.Point(58, 57)
+        $outputValue.Location = New-Object System.Drawing.Point(20, 70)
         $outputValue.AutoSize = $false
-        $outputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $inputStart - 76)), 20)
+        $outputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $inputStart - 40)), 20)
         $outputValue.AutoEllipsis = $true
         $card.Controls.Add($outputValue)
 
-        $inputCaption = New-Label 'IN' 7.5 'Bold'
-        $inputCaption.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
-        $inputCaption.Location = New-Object System.Drawing.Point($inputStart, 59)
+        $inputCaption = New-Label 'IN' 8 'Bold'
+        $inputCaption.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
+        $inputCaption.Location = New-Object System.Drawing.Point($inputStart, 51)
         $card.Controls.Add($inputCaption)
-        $inputValue = New-Label $profile.InputName 8.2
+        $inputValue = New-Label $profile.InputName 8.4
         $inputValue.ForeColor = $colorTextSecondary
-        $inputValue.Location = New-Object System.Drawing.Point(($inputStart + 38), 57)
+        $inputValue.Location = New-Object System.Drawing.Point($inputStart, 70)
         $inputValue.AutoSize = $false
-        $inputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - $inputStart - 56)), 20)
+        $inputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - $inputStart - 20)), 20)
         $inputValue.AutoEllipsis = $true
         $card.Controls.Add($inputValue)
 
-        $switchButton = New-Object System.Windows.Forms.Button
+        $switchButton = New-Object AudioSwitchNative.ModernButton
         $switchButton.Text = '切换方案'
-        $switchButton.Size = New-Object System.Drawing.Size(158, 34)
-        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 218), 47)
-        $switchButton.FlatStyle = 'Flat'
-        $switchButton.FlatAppearance.BorderSize = 0
-        $switchButton.BackColor = $colorAccent
+        $switchButton.Size = New-Object System.Drawing.Size(158, 36)
+        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 218), 56)
+        $switchButton.FillColor = $colorAccent
+        $switchButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
+        $switchButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
+        $switchButton.BorderWidth = 0
+        $switchButton.CornerRadius = 9
         $switchButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
-        $switchButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
-        [AudioSwitchNative.WindowEffects]::RoundControl($switchButton, 9)
+        $switchButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
         $capturedProfile = $profile
         $switchButton.Add_Click({ Switch-Profile $capturedProfile }.GetNewClosure())
         $card.Controls.Add($switchButton)
 
-        $deleteButton = New-Object System.Windows.Forms.Button
-        $deleteButton.Text = '×'
+        $deleteButton = New-Object AudioSwitchNative.ModernButton
+        $deleteButton.Text = ''
         $deleteButton.AccessibleName = '删除方案'
-        $deleteButton.Size = New-Object System.Drawing.Size(34, 34)
-        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 52), 47)
-        $deleteButton.FlatStyle = 'Flat'
-        $deleteButton.FlatAppearance.BorderSize = 0
-        $deleteButton.BackColor = [System.Drawing.Color]::FromArgb(220, 55, 66)
+        $deleteButton.Size = New-Object System.Drawing.Size(34, 36)
+        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 52), 56)
+        $deleteButton.FillColor = [System.Drawing.Color]::FromArgb(220, 55, 66)
+        $deleteButton.HoverFillColor = [System.Drawing.Color]::FromArgb(236, 72, 82)
+        $deleteButton.PressedFillColor = [System.Drawing.Color]::FromArgb(187, 43, 54)
+        $deleteButton.BorderWidth = 0
+        $deleteButton.CornerRadius = 9
+        $deleteButton.DrawCloseGlyph = $true
+        $deleteButton.GlyphColor = [System.Drawing.Color]::FromArgb(255, 245, 246)
         $deleteButton.ForeColor = [System.Drawing.Color]::FromArgb(255, 245, 246)
         $deleteButton.Font = [System.Drawing.Font]::new('Segoe UI', [single]12, [System.Drawing.FontStyle]::Bold)
-        [AudioSwitchNative.WindowEffects]::RoundControl($deleteButton, 9)
         $capturedName = [string]$profile.Name
         $deleteButton.Add_Click({
             $answer = [System.Windows.Forms.MessageBox]::Show(
@@ -1544,22 +1640,22 @@ function Get-SystemUsesLightTheme {
         $value = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -ErrorAction Stop).AppsUseLightTheme
         return ([int]$value -ne 0)
     } catch {
-        return $true
+        return $false
     }
 }
 
 function Apply-TrayMenuTheme {
     $isLight = Get-SystemUsesLightTheme
     if ($isLight) {
-        $background = [System.Drawing.Color]::FromArgb(250, 250, 252)
-        $text = [System.Drawing.Color]::FromArgb(24, 26, 31)
-        $muted = [System.Drawing.Color]::FromArgb(107, 114, 128)
-        $danger = [System.Drawing.Color]::FromArgb(190, 45, 55)
+        $background = [System.Drawing.Color]::FromArgb(248, 250, 252)
+        $text = [System.Drawing.Color]::FromArgb(22, 31, 44)
+        $muted = [System.Drawing.Color]::FromArgb(99, 115, 136)
+        $danger = [System.Drawing.Color]::FromArgb(194, 48, 61)
     } else {
-        $background = [System.Drawing.Color]::FromArgb(24, 26, 31)
-        $text = [System.Drawing.Color]::FromArgb(239, 241, 245)
-        $muted = [System.Drawing.Color]::FromArgb(145, 151, 163)
-        $danger = [System.Drawing.Color]::FromArgb(255, 112, 122)
+        $background = [System.Drawing.Color]::FromArgb(25, 32, 41)
+        $text = [System.Drawing.Color]::FromArgb(241, 245, 248)
+        $muted = [System.Drawing.Color]::FromArgb(158, 174, 189)
+        $danger = [System.Drawing.Color]::FromArgb(255, 107, 120)
     }
 
     $newRenderer = [AudioSwitchNative.ModernMenuRenderer]::new([bool]$isLight)
@@ -1567,6 +1663,15 @@ function Apply-TrayMenuTheme {
     $script:TrayMenuRenderer = $newRenderer
     $trayMenu.BackColor = $background
     $trayMenu.ForeColor = $text
+    if ($null -ne $script:TrayHeaderPanel) {
+        $script:TrayHeaderPanel.BackColor = if ($isLight) {
+            [System.Drawing.Color]::FromArgb(252, 253, 255)
+        } else {
+            [System.Drawing.Color]::FromArgb(39, 48, 58)
+        }
+    }
+    if ($null -ne $script:TrayHeaderBrand) { $script:TrayHeaderBrand.ForeColor = $text }
+    if ($null -ne $script:TrayCurrentLabel) { $script:TrayCurrentLabel.ForeColor = $muted }
     foreach ($menuItem in $trayMenu.Items) {
         if ($menuItem.Name -eq 'menuHeader' -or $menuItem.Name -eq 'emptyProfiles') {
             $menuItem.ForeColor = $muted
@@ -1592,9 +1697,9 @@ function Update-TrayMenuState {
             $menuItem.Checked = [bool]($output -and $input -and $output.IsDefault -and $input.IsDefault)
             if ($menuItem.Checked) { $currentName = [string]$profile.Name }
         }
-        $header = $trayMenu.Items.Find('menuHeader', $false) | Select-Object -First 1
-        if ($header) {
-            $header.Text = if ($currentName) { "AUDIO SWITCH    ·    当前：$currentName" } else { 'AUDIO SWITCH    ·    选择音频方案' }
+        if ($null -ne $script:TrayCurrentLabel) {
+            $script:TrayCurrentLabel.Text = if ($currentName) { "●  当前方案  ·  $currentName" } else { '○  请选择一个音频方案' }
+            $script:TrayCurrentLabel.ForeColor = if ($currentName) { [System.Drawing.Color]::FromArgb(104, 231, 179) } else { $colorMuted }
         }
     } catch { }
 }
@@ -1603,12 +1708,23 @@ function Rebuild-TrayMenu {
     if ($null -eq $trayMenu) { return }
     $trayMenu.Items.Clear()
 
-    $header = New-Object System.Windows.Forms.ToolStripMenuItem
+    $script:TrayHeaderPanel = New-Object System.Windows.Forms.Panel
+    $script:TrayHeaderPanel.Size = New-Object System.Drawing.Size(306, 58)
+    $script:TrayHeaderPanel.Margin = New-Object System.Windows.Forms.Padding(0)
+    $script:TrayHeaderBrand = New-Label 'AUDIO ROUTER' 10 'Bold'
+    $script:TrayHeaderBrand.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]10, [System.Drawing.FontStyle]::Bold)
+    $script:TrayHeaderBrand.Location = New-Object System.Drawing.Point(14, 9)
+    $script:TrayHeaderPanel.Controls.Add($script:TrayHeaderBrand)
+    $script:TrayCurrentLabel = New-Label '○  请选择一个音频方案' 8
+    $script:TrayCurrentLabel.Location = New-Object System.Drawing.Point(14, 33)
+    $script:TrayCurrentLabel.MaximumSize = New-Object System.Drawing.Size(278, 20)
+    $script:TrayHeaderPanel.Controls.Add($script:TrayCurrentLabel)
+    $header = [System.Windows.Forms.ToolStripControlHost]::new($script:TrayHeaderPanel)
     $header.Name = 'menuHeader'
-    $header.Text = 'AUDIO SWITCH    ·    选择音频方案'
-    $header.Enabled = $false
-    $header.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
-    $header.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+    $header.AutoSize = $false
+    $header.Size = New-Object System.Drawing.Size(306, 58)
+    $header.Margin = New-Object System.Windows.Forms.Padding(0)
+    $header.Padding = New-Object System.Windows.Forms.Padding(0)
     [void]$trayMenu.Items.Add($header)
     [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
@@ -1616,12 +1732,13 @@ function Rebuild-TrayMenu {
         $item = New-Object System.Windows.Forms.ToolStripMenuItem
         $item.Name = "profile_$([Guid]::NewGuid().ToString('N'))"
         $item.Text = [string]$profile.Name
+        $item.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.8, [System.Drawing.FontStyle]::Regular)
         $item.Tag = $profile
         $item.ToolTipText = "输出：$($profile.OutputName)`n输入：$($profile.InputName)"
         if ([int]$profile.HotkeyKey -gt 0) {
             $item.ShortcutKeyDisplayString = Get-HotkeyDisplay ([int]$profile.HotkeyModifiers) ([int]$profile.HotkeyKey)
         }
-        $item.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+        $item.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
         $captured = $profile
         $item.Add_Click({ Switch-Profile $captured }.GetNewClosure())
         [void]$trayMenu.Items.Add($item)
@@ -1631,23 +1748,23 @@ function Rebuild-TrayMenu {
         $emptyItem.Name = 'emptyProfiles'
         $emptyItem.Text = '还没有保存音频方案'
         $emptyItem.Enabled = $false
-        $emptyItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+        $emptyItem.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
         [void]$trayMenu.Items.Add($emptyItem)
     }
 
     [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $showItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $showItem.Name = 'showWindow'
-    $showItem.Text = '打开控制面板'
-    $showItem.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
-    $showItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $showItem.Text = '打开 Audio Router'
+    $showItem.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.8, [System.Drawing.FontStyle]::Bold)
+    $showItem.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
     $showItem.Add_Click({ Show-MainWindow })
     [void]$trayMenu.Items.Add($showItem)
 
     $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $refreshItem.Name = 'refreshDevices'
     $refreshItem.Text = '刷新音频设备'
-    $refreshItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $refreshItem.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
     $refreshItem.Add_Click({ Refresh-Devices; Update-TrayMenuState })
     [void]$trayMenu.Items.Add($refreshItem)
 
@@ -1655,7 +1772,7 @@ function Rebuild-TrayMenu {
     $startupItem.Name = 'startupToggle'
     $startupItem.Text = '随 Windows 启动'
     $startupItem.Checked = Test-StartupRegistration
-    $startupItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $startupItem.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
     $startupItem.Add_Click({
         try {
             Set-StartupRegistration (-not $startupItem.Checked)
@@ -1670,8 +1787,8 @@ function Rebuild-TrayMenu {
     [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
     $exitItem.Name = 'exitApp'
-    $exitItem.Text = '退出 Audio Switch'
-    $exitItem.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
+    $exitItem.Text = '退出 Audio Router'
+    $exitItem.Padding = New-Object System.Windows.Forms.Padding(14, 9, 14, 9)
     $exitItem.Add_Click({ $script:ClosingForReal = $true; $trayIcon.Visible = $false; $form.Close() })
     [void]$trayMenu.Items.Add($exitItem)
 
@@ -1690,15 +1807,16 @@ try {
     $script:OwnsAppIcon = $false
 }
 
-$colorBackground = [System.Drawing.Color]::FromArgb(11, 18, 32)
-$colorSurface = [System.Drawing.Color]::FromArgb(22, 32, 48)
-$colorElevated = [System.Drawing.Color]::FromArgb(31, 44, 63)
-$colorInput = [System.Drawing.Color]::FromArgb(16, 25, 40)
-$colorBorder = [System.Drawing.Color]::FromArgb(48, 65, 87)
-$colorTextPrimary = [System.Drawing.Color]::FromArgb(244, 247, 251)
-$colorTextSecondary = [System.Drawing.Color]::FromArgb(190, 201, 216)
-$colorMuted = [System.Drawing.Color]::FromArgb(133, 149, 170)
-$colorAccent = [System.Drawing.Color]::FromArgb(89, 232, 159)
+$colorBackground = [System.Drawing.Color]::FromArgb(19, 25, 33)
+$colorSurface = [System.Drawing.Color]::FromArgb(37, 47, 57)
+$colorElevated = [System.Drawing.Color]::FromArgb(48, 59, 70)
+$colorInput = [System.Drawing.Color]::FromArgb(27, 35, 44)
+$colorBorder = [System.Drawing.Color]::FromArgb(70, 85, 101)
+$colorDivider = [System.Drawing.Color]::FromArgb(48, 59, 70)
+$colorTextPrimary = [System.Drawing.Color]::FromArgb(246, 248, 250)
+$colorTextSecondary = [System.Drawing.Color]::FromArgb(204, 214, 223)
+$colorMuted = [System.Drawing.Color]::FromArgb(153, 170, 187)
+$colorAccent = [System.Drawing.Color]::FromArgb(104, 231, 179)
 
 $form = New-Object AudioSwitchNative.BufferedForm
 $form.Text = 'AUDIO ROUTER'
@@ -1707,33 +1825,34 @@ $form.MinimumSize = New-Object System.Drawing.Size(836, 700)
 $form.StartPosition = 'CenterScreen'
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $form.BackColor = $colorBackground
+$form.Opacity = 0.985
 $form.ForeColor = $colorTextPrimary
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $form.Icon = $appIcon
 
-$brandAudio = New-Label 'A U D I O' 7.2 'Bold'
-$brandAudio.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]7.2, [System.Drawing.FontStyle]::Bold)
-$brandAudio.Location = New-Object System.Drawing.Point(26, 18)
+$brandAudio = New-Label 'A U D I O' 8.2 'Bold'
+$brandAudio.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]8.2, [System.Drawing.FontStyle]::Bold)
+$brandAudio.Location = New-Object System.Drawing.Point(28, 16)
 $brandAudio.ForeColor = $colorAccent
 $form.Controls.Add($brandAudio)
-$brandRouter = New-Label 'ROUTER' 21.5 'Bold'
-$brandRouter.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]21.5, [System.Drawing.FontStyle]::Bold)
-$brandRouter.Location = New-Object System.Drawing.Point(23, 31)
+$brandRouter = New-Label 'ROUTER' 24 'Bold'
+$brandRouter.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]24, [System.Drawing.FontStyle]::Bold)
+$brandRouter.Location = New-Object System.Drawing.Point(28, 30)
 $brandRouter.ForeColor = $colorTextPrimary
 $form.Controls.Add($brandRouter)
 
 $refreshButton = New-Object AudioSwitchNative.ModernButton
-$refreshButton.Text = '刷新设备'
-$refreshButton.Size = New-Object System.Drawing.Size(124, 36)
-$refreshButton.Location = New-Object System.Drawing.Point(672, 25)
+$refreshButton.Text = '↻  刷新设备'
+$refreshButton.Size = New-Object System.Drawing.Size(136, 40)
+$refreshButton.Location = New-Object System.Drawing.Point(660, 23)
 $refreshButton.Anchor = 'Top,Right'
-$refreshButton.FillColor = $colorSurface
-$refreshButton.HoverFillColor = $colorElevated
-$refreshButton.PressedFillColor = $colorInput
-$refreshButton.BorderColor = $colorBorder
-$refreshButton.CornerRadius = 9
+$refreshButton.FillColor = [System.Drawing.Color]::FromArgb(34, 55, 56)
+$refreshButton.HoverFillColor = [System.Drawing.Color]::FromArgb(43, 72, 68)
+$refreshButton.PressedFillColor = [System.Drawing.Color]::FromArgb(29, 46, 49)
+$refreshButton.BorderColor = [System.Drawing.Color]::FromArgb(74, 137, 115)
+$refreshButton.CornerRadius = 10
 $refreshButton.ForeColor = $colorTextPrimary
-$refreshButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+$refreshButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]9, [System.Drawing.FontStyle]::Bold)
 $refreshButton.Add_Click({ Refresh-Devices })
 $form.Controls.Add($refreshButton)
 
@@ -1742,8 +1861,8 @@ $currentPanel.Location = New-Object System.Drawing.Point(24, 82)
 $currentPanel.Size = New-Object System.Drawing.Size(772, 92)
 $currentPanel.Anchor = 'Top,Left,Right'
 $currentPanel.CornerRadius = 14
-$currentPanel.FillColor = [System.Drawing.Color]::FromArgb(196, 22, 32, 48)
-$currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 65, 84, 108)
+$currentPanel.FillColor = [System.Drawing.Color]::FromArgb(164, 43, 54, 65)
+$currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 84, 100, 116)
 $form.Controls.Add($currentPanel)
 $now = New-Label 'ACTIVE AUDIO ROUTE' 7.5 'Bold'
 $now.Location = New-Object System.Drawing.Point(16, 10)
@@ -1752,15 +1871,15 @@ $currentPanel.Controls.Add($now)
 
 $routeBadge = New-Label '●  WINDOWS DEFAULT' 7.2 'Bold'
 $routeBadge.Location = New-Object System.Drawing.Point(624, 10)
-$routeBadge.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$routeBadge.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
 $currentPanel.Controls.Add($routeBadge)
 
 $outputTile = New-Object AudioSwitchNative.AcrylicPanel
 $outputTile.Location = New-Object System.Drawing.Point(16, 34)
 $outputTile.Size = New-Object System.Drawing.Size(360, 46)
 $outputTile.CornerRadius = 10
-$outputTile.FillColor = [System.Drawing.Color]::FromArgb(188, 14, 24, 38)
-$outputTile.BorderColor = [System.Drawing.Color]::FromArgb(80, 57, 78, 102)
+$outputTile.FillColor = [System.Drawing.Color]::FromArgb(148, 28, 37, 46)
+$outputTile.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
 $currentPanel.Controls.Add($outputTile)
 $outputTag = New-Label 'OUT' 7.5 'Bold'
 $outputTag.Location = New-Object System.Drawing.Point(12, 15)
@@ -1782,12 +1901,12 @@ $inputTile = New-Object AudioSwitchNative.AcrylicPanel
 $inputTile.Location = New-Object System.Drawing.Point(396, 34)
 $inputTile.Size = New-Object System.Drawing.Size(360, 46)
 $inputTile.CornerRadius = 10
-$inputTile.FillColor = [System.Drawing.Color]::FromArgb(188, 14, 24, 38)
-$inputTile.BorderColor = [System.Drawing.Color]::FromArgb(80, 57, 78, 102)
+$inputTile.FillColor = [System.Drawing.Color]::FromArgb(148, 28, 37, 46)
+$inputTile.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
 $currentPanel.Controls.Add($inputTile)
 $inputTag = New-Label 'IN' 7.5 'Bold'
 $inputTag.Location = New-Object System.Drawing.Point(12, 15)
-$inputTag.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$inputTag.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
 $inputTile.Controls.Add($inputTag)
 $inCaption = New-Label '输入设备 · SYSTEM DEFAULT' 6.8 'Bold'
 $inCaption.Location = New-Object System.Drawing.Point(54, 5)
@@ -1815,8 +1934,8 @@ $createPanel.Location = New-Object System.Drawing.Point(24, 220)
 $createPanel.Size = New-Object System.Drawing.Size(772, 76)
 $createPanel.Anchor = 'Top,Left,Right'
 $createPanel.CornerRadius = 14
-$createPanel.FillColor = [System.Drawing.Color]::FromArgb(196, 22, 32, 48)
-$createPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 65, 84, 108)
+$createPanel.FillColor = [System.Drawing.Color]::FromArgb(164, 43, 54, 65)
+$createPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 84, 100, 116)
 $form.Controls.Add($createPanel)
 
 $nameHint = New-Label '方案名称' 7.5 'Bold'
@@ -1862,16 +1981,17 @@ $inputCombo.BorderColor = $colorBorder
 $inputCombo.ActiveBorderColor = $colorAccent
 $createPanel.Controls.Add($inputCombo)
 
-$saveButton = New-Object System.Windows.Forms.Button
+$saveButton = New-Object AudioSwitchNative.ModernButton
 $saveButton.Text = '保存方案'
 $saveButton.Size = New-Object System.Drawing.Size(104, 31)
 $saveButton.Location = New-Object System.Drawing.Point(652, 33)
-$saveButton.FlatStyle = 'Flat'
-$saveButton.FlatAppearance.BorderSize = 0
-$saveButton.BackColor = $colorAccent
+$saveButton.FillColor = $colorAccent
+$saveButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
+$saveButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
+$saveButton.BorderWidth = 0
+$saveButton.CornerRadius = 9
 $saveButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
 $saveButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
-[AudioSwitchNative.WindowEffects]::RoundControl($saveButton, 9)
 $saveButton.Add_Click({
     $name = $profileNameBox.Text.Trim()
     if (-not $name) { Set-Status '请给方案起个名字，例如「耳机」或「音箱」' $true; return }
@@ -1903,8 +2023,8 @@ $settingsPanel.Location = New-Object System.Drawing.Point(24, 636)
 $settingsPanel.Size = New-Object System.Drawing.Size(772, 46)
 $settingsPanel.Anchor = 'Bottom,Left,Right'
 $settingsPanel.CornerRadius = 12
-$settingsPanel.FillColor = [System.Drawing.Color]::FromArgb(180, 18, 28, 43)
-$settingsPanel.BorderColor = [System.Drawing.Color]::FromArgb(78, 58, 76, 99)
+$settingsPanel.FillColor = [System.Drawing.Color]::FromArgb(148, 39, 50, 61)
+$settingsPanel.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
 $form.Controls.Add($settingsPanel)
 $settingsCaption = New-Label '运行设置' 7.5 'Bold'
 $settingsCaption.Location = New-Object System.Drawing.Point(16, 15)
@@ -2003,16 +2123,16 @@ $noticePanel.Location = New-Object System.Drawing.Point(24, 568)
 $noticePanel.Size = New-Object System.Drawing.Size(772, 54)
 $noticePanel.Anchor = 'Bottom,Left,Right'
 $noticePanel.CornerRadius = 12
-$noticePanel.FillColor = [System.Drawing.Color]::FromArgb(188, 13, 38, 57)
-$noticePanel.BorderColor = [System.Drawing.Color]::FromArgb(105, 40, 112, 148)
+$noticePanel.FillColor = [System.Drawing.Color]::FromArgb(152, 31, 55, 62)
+$noticePanel.BorderColor = [System.Drawing.Color]::FromArgb(92, 67, 125, 141)
 $form.Controls.Add($noticePanel)
 $notice = New-Label '使用提示  ·  请在 Discord 与 Steam 中，将输入和输出设备设为 Default / 默认' 8.2 'Bold'
 $notice.Location = New-Object System.Drawing.Point(16, 8)
-$notice.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$notice.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
 $noticePanel.Controls.Add($notice)
 $notice2 = New-Label '通话中若没有立即更新，退出并重新进入语音频道即可。' 7.8
 $notice2.Location = New-Object System.Drawing.Point(16, 30)
-$notice2.ForeColor = [System.Drawing.Color]::FromArgb(158, 190, 211)
+$notice2.ForeColor = [System.Drawing.Color]::FromArgb(173, 201, 214)
 $noticePanel.Controls.Add($notice2)
 
 $statusLabel = New-Label '准备就绪' 8
@@ -2037,17 +2157,24 @@ $currentPanel.Add_Resize({ Update-ResponsiveLayout })
 $createPanel.Add_Resize({ Update-ResponsiveLayout })
 
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
-$trayMenu.Padding = New-Object System.Windows.Forms.Padding(6)
-$trayMenu.MinimumSize = New-Object System.Drawing.Size(250, 0)
+$trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.8)
+$trayMenu.Padding = New-Object System.Windows.Forms.Padding(8)
+$trayMenu.MinimumSize = New-Object System.Drawing.Size(336, 0)
 $trayMenu.ShowImageMargin = $false
 $trayMenu.ShowCheckMargin = $true
 $trayMenu.DropShadowEnabled = $true
+$trayMenu.Opacity = 0.98
 $trayMenu.Add_Opening({
     Apply-TrayMenuTheme
     Update-TrayMenuState
     $startupMenuItem = $trayMenu.Items.Find('startupToggle', $false) | Select-Object -First 1
     if ($startupMenuItem) { $startupMenuItem.Checked = Test-StartupRegistration }
+})
+$trayMenu.Add_Opened({
+    [AudioSwitchNative.WindowEffects]::EnableSolidDark($trayMenu.Handle)
+    [AudioSwitchNative.WindowEffects]::RoundControl($trayMenu, 14)
+    $trayMenu.Invalidate($true)
+    $trayMenu.Update()
 })
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
 $trayIcon.Text = '音频一键切换'
@@ -2109,6 +2236,46 @@ Load-Profiles
 Render-Profiles
 Rebuild-TrayMenu
 Refresh-Devices
+if (-not [string]::IsNullOrWhiteSpace($TrayMenuPreviewPath)) {
+    $script:StartHidden = $false
+    $script:Settings.StartMinimized = $false
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.Location = New-Object System.Drawing.Point(-32000, -32000)
+    $form.ShowInTaskbar = $false
+    $form.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    $trayMenu.Show($form, (New-Object System.Drawing.Point(10, 10)))
+    [System.Windows.Forms.Application]::DoEvents()
+    if ($TrayMenuPreviewDark) {
+        $trayMenu.Renderer = [AudioSwitchNative.ModernMenuRenderer]::new($false)
+        $trayMenu.BackColor = [System.Drawing.Color]::FromArgb(25, 32, 41)
+        $trayMenu.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 248)
+        $script:TrayHeaderPanel.BackColor = [System.Drawing.Color]::FromArgb(39, 48, 58)
+        $script:TrayHeaderBrand.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 248)
+        foreach ($menuItem in $trayMenu.Items) {
+            if ($menuItem.Name -eq 'exitApp') { $menuItem.ForeColor = [System.Drawing.Color]::FromArgb(255, 107, 120) }
+            elseif ($menuItem.Name -ne 'menuHeader') { $menuItem.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 248) }
+        }
+    } else {
+        Apply-TrayMenuTheme
+    }
+    Update-TrayMenuState
+    [AudioSwitchNative.WindowEffects]::RoundControl($trayMenu, 14)
+    $trayMenu.Invalidate($true)
+    $trayMenu.Update()
+    $menuPreview = New-Object System.Drawing.Bitmap($trayMenu.Width, $trayMenu.Height)
+    $trayMenu.DrawToBitmap($menuPreview, (New-Object System.Drawing.Rectangle(0, 0, $trayMenu.Width, $trayMenu.Height)))
+    $menuPreview.Save($TrayMenuPreviewPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    $menuPreview.Dispose()
+    $trayMenu.Close()
+    $form.Hide()
+    if ($null -ne $script:HotkeyManager) { $script:HotkeyManager.Dispose(); $script:HotkeyManager = $null }
+    $trayIcon.Visible = $false
+    $trayIcon.Dispose()
+    if ($script:OwnsAppIcon) { $appIcon.Dispose() }
+    $form.Dispose()
+    exit 0
+}
 if (-not [string]::IsNullOrWhiteSpace($HotkeyPreviewPath)) {
     $previewProfile = @($script:Profiles | Select-Object -First 1)
     if (-not $previewProfile.Count) {
