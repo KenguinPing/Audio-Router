@@ -3,7 +3,10 @@
 param(
     [switch]$SelfTest,
     [switch]$Minimized,
-    [string]$UiPreviewPath
+    [string]$UiPreviewPath,
+    [int]$UiPreviewWidth,
+    [int]$UiPreviewHeight,
+    [string]$HotkeyPreviewPath
 )
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -293,7 +296,15 @@ namespace AudioSwitchNative
             BorderColor = Color.FromArgb(95, 72, 91, 116);
             BackColor = Color.Transparent;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
-                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
+                     ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            Invalidate(true);
+            if (Parent != null) Parent.Invalidate(Bounds, true);
         }
 
         static GraphicsPath RoundedPath(Rectangle bounds, int radius)
@@ -571,6 +582,65 @@ namespace AudioSwitchNative
         }
     }
 
+    public sealed class ModernButton : Button
+    {
+        bool hovered;
+        bool pressed;
+        public Color FillColor { get; set; }
+        public Color HoverFillColor { get; set; }
+        public Color PressedFillColor { get; set; }
+        public Color BorderColor { get; set; }
+        public int BorderWidth { get; set; }
+        public int CornerRadius { get; set; }
+
+        public ModernButton()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor |
+                     ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            BackColor = Color.Transparent;
+            FillColor = Color.FromArgb(22, 32, 48);
+            HoverFillColor = Color.FromArgb(31, 44, 63);
+            PressedFillColor = Color.FromArgb(16, 25, 40);
+            BorderColor = Color.FromArgb(48, 65, 87);
+            BorderWidth = 1;
+            CornerRadius = 9;
+            FlatStyle = FlatStyle.Flat;
+            FlatAppearance.BorderSize = 0;
+            UseVisualStyleBackColor = false;
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hovered = false; pressed = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) pressed = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            var fillColor = pressed ? PressedFillColor : (hovered ? HoverFillColor : FillColor);
+            if (!Enabled) fillColor = Color.FromArgb(120, fillColor);
+            using (var path = ModernTextBox.RoundedRect(rect, CornerRadius))
+            using (var fill = new SolidBrush(fillColor))
+            {
+                e.Graphics.FillPath(fill, path);
+                if (BorderWidth > 0 && BorderColor.A > 0)
+                {
+                    using (var border = new Pen(BorderColor, BorderWidth))
+                        e.Graphics.DrawPath(border, path);
+                }
+            }
+            var textColor = Enabled ? ForeColor : Color.FromArgb(120, ForeColor);
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, textColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+    }
+
     public sealed class ModernVScrollBar : Control
     {
         int maximum;
@@ -651,6 +721,82 @@ namespace AudioSwitchNative
         protected override void OnMouseWheel(MouseEventArgs e) { Value -= Math.Sign(e.Delta) * 48; base.OnMouseWheel(e); }
     }
 
+    public sealed class HotkeyPressedEventArgs : EventArgs
+    {
+        public string ProfileName { get; private set; }
+        public HotkeyPressedEventArgs(string profileName) { ProfileName = profileName; }
+    }
+
+    public sealed class GlobalHotkeyManager : NativeWindow, IDisposable
+    {
+        const int WM_HOTKEY = 0x0312;
+        const uint MOD_NOREPEAT = 0x4000;
+        readonly Dictionary<int, string> registrations = new Dictionary<int, string>();
+        int nextId = 7300;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint virtualKey);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool UnregisterHotKey(IntPtr hwnd, int id);
+
+        public event EventHandler<HotkeyPressedEventArgs> HotkeyPressed;
+
+        public GlobalHotkeyManager()
+        {
+            var parameters = new CreateParams();
+            parameters.Caption = "AudioRouterHotkeys";
+            parameters.Parent = new IntPtr(-3);
+            CreateHandle(parameters);
+        }
+
+        public bool Register(string profileName, uint modifiers, Keys key)
+        {
+            int id = nextId++;
+            if (!RegisterHotKey(Handle, id, modifiers | MOD_NOREPEAT, (uint)key)) return false;
+            registrations[id] = profileName;
+            return true;
+        }
+
+        public void UnregisterAll()
+        {
+            foreach (var id in new List<int>(registrations.Keys)) UnregisterHotKey(Handle, id);
+            registrations.Clear();
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == WM_HOTKEY)
+            {
+                string profileName;
+                if (registrations.TryGetValue(message.WParam.ToInt32(), out profileName) && HotkeyPressed != null)
+                    HotkeyPressed(this, new HotkeyPressedEventArgs(profileName));
+            }
+            base.WndProc(ref message);
+        }
+
+        public void Dispose()
+        {
+            UnregisterAll();
+            if (Handle != IntPtr.Zero) DestroyHandle();
+        }
+    }
+
+    public sealed class BufferedForm : Form
+    {
+        public BufferedForm()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            DoubleBuffered = true;
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.Clear(BackColor);
+        }
+    }
+
     public static class WindowEffects
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -675,6 +821,55 @@ namespace AudioSwitchNative
 
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
+        public static void ApplyIdentityAndIcon(Form form, Icon icon)
+        {
+            try { SetCurrentProcessExplicitAppUserModelID("AudioRouter.Desktop"); } catch { }
+            if (form == null || icon == null) return;
+            try
+            {
+                form.Icon = icon;
+                var handle = form.Handle;
+                SendMessage(handle, 0x0080, new IntPtr(1), icon.Handle);
+                SendMessage(handle, 0x0080, IntPtr.Zero, icon.Handle);
+            }
+            catch { }
+        }
+
+        public static void EnableSolidDark(IntPtr hwnd)
+        {
+            try
+            {
+                int darkValue = 1;
+                DwmSetWindowAttribute(hwnd, 20, ref darkValue, sizeof(int));
+                int corners = 2;
+                DwmSetWindowAttribute(hwnd, 33, ref corners, sizeof(int));
+                if (Environment.OSVersion.Version.Build >= 22000)
+                {
+                    int backdrop = 1;
+                    DwmSetWindowAttribute(hwnd, 38, ref backdrop, sizeof(int));
+                }
+
+                var accent = new AccentPolicy();
+                accent.AccentState = 0;
+                var size = Marshal.SizeOf(accent);
+                var pointer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(accent, pointer, false);
+                    var data = new WindowCompositionAttributeData { Attribute = 19, Data = pointer, SizeOfData = size };
+                    SetWindowCompositionAttribute(hwnd, ref data);
+                }
+                finally { Marshal.FreeHGlobal(pointer); }
+            }
+            catch { }
+        }
 
         public static void EnableAcrylic(IntPtr hwnd, bool dark)
         {
@@ -748,6 +943,14 @@ if ($SelfTest) {
         $testMenu = New-Object System.Windows.Forms.ContextMenuStrip
         $testMenu.Renderer = [AudioSwitchNative.ModernMenuRenderer]::new($false)
         $testMenu.Dispose()
+        $testHotkeyManager = New-Object AudioSwitchNative.GlobalHotkeyManager
+        if (-not $testHotkeyManager.Register('__selftest__', [uint32]7, [System.Windows.Forms.Keys]::F24)) {
+            throw 'Global hotkey registration is unavailable or the test combination is occupied.'
+        }
+        $testHotkeyManager.UnregisterAll()
+        $testHotkeyManager.Dispose()
+        $testHotkeyButton = New-Object AudioSwitchNative.ModernCheckBox
+        $testHotkeyButton.Dispose()
         $testOutputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Render))
         $testInputs = @([AudioSwitchNative.AudioManager]::GetEndpoints([AudioSwitchNative.DataFlow]::Capture))
         Write-Output "SELFTEST OK"
@@ -777,6 +980,7 @@ $script:InitializingSettings = $true
 $script:Settings = [PSCustomObject]@{ StartMinimized = $false }
 $script:StartHidden = [bool]$Minimized
 $script:TrayMenuRenderer = $null
+$script:HotkeyManager = $null
 
 if (-not (Test-Path $script:AppDir)) { New-Item -ItemType Directory -Path $script:AppDir -Force | Out-Null }
 
@@ -950,9 +1154,254 @@ function Switch-Profile($profile) {
     }
 }
 
+function Get-HotkeyDisplay([int]$Modifiers, [int]$KeyCode) {
+    if ($KeyCode -le 0) { return '未设置快捷键' }
+    $parts = New-Object System.Collections.Generic.List[string]
+    if (($Modifiers -band 2) -ne 0) { $parts.Add('Ctrl') }
+    if (($Modifiers -band 1) -ne 0) { $parts.Add('Alt') }
+    if (($Modifiers -band 4) -ne 0) { $parts.Add('Shift') }
+    if (($Modifiers -band 8) -ne 0) { $parts.Add('Win') }
+    $keyName = ([System.Windows.Forms.Keys]$KeyCode).ToString()
+    if ($keyName -match '^D([0-9])$') { $keyName = $Matches[1] }
+    $keyNames = @{
+        'OemMinus' = '-'; 'Oemplus' = '='; 'Oemcomma' = ','; 'OemPeriod' = '.'
+        'OemQuestion' = '/'; 'OemSemicolon' = ';'; 'OemQuotes' = "'"
+        'OemOpenBrackets' = '['; 'OemCloseBrackets' = ']'; 'OemPipe' = '\'
+    }
+    if ($keyNames.ContainsKey($keyName)) { $keyName = $keyNames[$keyName] }
+    $parts.Add($keyName)
+    return ($parts -join ' + ')
+}
+
+function Register-ProfileHotkeys {
+    if ($null -eq $script:HotkeyManager) { return @() }
+    $script:HotkeyManager.UnregisterAll()
+    $failed = New-Object System.Collections.Generic.List[string]
+    foreach ($profile in @($script:Profiles)) {
+        $keyCode = [int]$profile.HotkeyKey
+        if ($keyCode -le 0) { continue }
+        $ok = $script:HotkeyManager.Register([string]$profile.Name, [uint32]([int]$profile.HotkeyModifiers), [System.Windows.Forms.Keys]$keyCode)
+        if (-not $ok) { $failed.Add([string]$profile.Name) }
+    }
+    return @($failed)
+}
+
+function Show-HotkeyEditor($profile, [string]$PreviewPath) {
+    $dialog = New-Object AudioSwitchNative.BufferedForm
+    $dialog.Text = "编辑快捷键 · $($profile.Name)"
+    $dialog.ClientSize = New-Object System.Drawing.Size(470, 252)
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.BackColor = $colorBackground
+    $dialog.ForeColor = $colorTextPrimary
+    $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+    $dialog.Icon = $appIcon
+    $dialog.KeyPreview = $true
+
+    $title = New-Label '按下新的快捷键' 15 'Bold'
+    $title.Location = New-Object System.Drawing.Point(24, 22)
+    $dialog.Controls.Add($title)
+    $hint = New-Label '建议使用 Ctrl / Alt / Shift 与字母或数字组合，也可以直接使用 F1–F12。' 8.5
+    $hint.Location = New-Object System.Drawing.Point(25, 54)
+    $hint.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($hint)
+
+    $capturePanel = New-Object AudioSwitchNative.AcrylicPanel
+    $capturePanel.Location = New-Object System.Drawing.Point(24, 84)
+    $capturePanel.Size = New-Object System.Drawing.Size(422, 68)
+    $capturePanel.CornerRadius = 12
+    $capturePanel.FillColor = [System.Drawing.Color]::FromArgb(205, 16, 25, 40)
+    $capturePanel.BorderColor = [System.Drawing.Color]::FromArgb(105, 61, 89, 116)
+    $dialog.Controls.Add($capturePanel)
+    $captureCaption = New-Label '当前组合' 7.5 'Bold'
+    $captureCaption.Location = New-Object System.Drawing.Point(16, 10)
+    $captureCaption.ForeColor = [System.Drawing.Color]::FromArgb(166, 184, 205)
+    $capturePanel.Controls.Add($captureCaption)
+    $hotkeyValue = New-Label '' 13 'Bold'
+    $hotkeyValue.Location = New-Object System.Drawing.Point(16, 31)
+    $hotkeyValue.ForeColor = $colorAccent
+    $capturePanel.Controls.Add($hotkeyValue)
+
+    $state = [PSCustomObject]@{
+        Modifiers = [int]$profile.HotkeyModifiers
+        KeyCode = [int]$profile.HotkeyKey
+        Accepted = $false
+    }
+    $hotkeyValue.Text = Get-HotkeyDisplay $state.Modifiers $state.KeyCode
+
+    $validation = New-Label '等待按键…' 8.4 'Bold'
+    $validation.Location = New-Object System.Drawing.Point(25, 160)
+    $validation.ForeColor = [System.Drawing.Color]::FromArgb(147, 197, 253)
+    $dialog.Controls.Add($validation)
+
+    $saveHotkeyButton = New-Object System.Windows.Forms.Button
+    $saveHotkeyButton.Text = '保存快捷键'
+    $saveHotkeyButton.Size = New-Object System.Drawing.Size(118, 34)
+    $saveHotkeyButton.Location = New-Object System.Drawing.Point(328, 198)
+    $saveHotkeyButton.FlatStyle = 'Flat'
+    $saveHotkeyButton.FlatAppearance.BorderSize = 0
+    $saveHotkeyButton.BackColor = $colorAccent
+    $saveHotkeyButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
+    $saveHotkeyButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+    [AudioSwitchNative.WindowEffects]::RoundControl($saveHotkeyButton, 9)
+    $dialog.Controls.Add($saveHotkeyButton)
+
+    $clearHotkeyButton = New-Object AudioSwitchNative.ModernButton
+    $clearHotkeyButton.Text = '清除快捷键'
+    $clearHotkeyButton.Size = New-Object System.Drawing.Size(112, 34)
+    $clearHotkeyButton.Location = New-Object System.Drawing.Point(122, 198)
+    $clearHotkeyButton.FillColor = $colorSurface
+    $clearHotkeyButton.HoverFillColor = $colorElevated
+    $clearHotkeyButton.PressedFillColor = $colorInput
+    $clearHotkeyButton.BorderColor = $colorBorder
+    $clearHotkeyButton.CornerRadius = 9
+    $clearHotkeyButton.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($clearHotkeyButton)
+
+    $cancelHotkeyButton = New-Object AudioSwitchNative.ModernButton
+    $cancelHotkeyButton.Text = '取消'
+    $cancelHotkeyButton.Size = New-Object System.Drawing.Size(82, 34)
+    $cancelHotkeyButton.Location = New-Object System.Drawing.Point(240, 198)
+    $cancelHotkeyButton.FillColor = $colorSurface
+    $cancelHotkeyButton.HoverFillColor = $colorElevated
+    $cancelHotkeyButton.PressedFillColor = $colorInput
+    $cancelHotkeyButton.BorderColor = $colorBorder
+    $cancelHotkeyButton.CornerRadius = 9
+    $cancelHotkeyButton.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($cancelHotkeyButton)
+
+    $dialog.Add_KeyDown({
+        param($sender, $eventArgs)
+        $eventArgs.SuppressKeyPress = $true
+        $eventArgs.Handled = $true
+        if ($eventArgs.KeyCode -in @('ControlKey', 'ShiftKey', 'Menu', 'LControlKey', 'RControlKey', 'LShiftKey', 'RShiftKey', 'LMenu', 'RMenu')) {
+            $validation.Text = '继续按下字母、数字或功能键'
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(147, 197, 253)
+            return
+        }
+        $modifiers = 0
+        if ($eventArgs.Control) { $modifiers = $modifiers -bor 2 }
+        if ($eventArgs.Alt) { $modifiers = $modifiers -bor 1 }
+        if ($eventArgs.Shift) { $modifiers = $modifiers -bor 4 }
+        $keyCode = [int]$eventArgs.KeyCode
+        $isFunctionKey = ($keyCode -ge [int][System.Windows.Forms.Keys]::F1 -and $keyCode -le [int][System.Windows.Forms.Keys]::F24)
+        if ($modifiers -eq 0 -and -not $isFunctionKey) {
+            $validation.Text = '普通按键需要至少搭配 Ctrl、Alt 或 Shift'
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            return
+        }
+        $state.Modifiers = $modifiers
+        $state.KeyCode = $keyCode
+        $hotkeyValue.Text = Get-HotkeyDisplay $state.Modifiers $state.KeyCode
+        $validation.Text = '组合已记录，点击“保存快捷键”即可生效'
+        $validation.ForeColor = $colorAccent
+    }.GetNewClosure())
+
+    $saveHotkeyButton.Add_Click({
+        if ($state.KeyCode -le 0) {
+            $validation.Text = '请先按下一个快捷键组合，或点击“清除快捷键”'
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            return
+        }
+        $duplicate = @($script:Profiles | Where-Object {
+            $_.Name -ne $profile.Name -and [int]$_.HotkeyModifiers -eq $state.Modifiers -and [int]$_.HotkeyKey -eq $state.KeyCode
+        })
+        if ($duplicate.Count -gt 0) {
+            $validation.Text = "该快捷键已用于方案「$($duplicate[0].Name)」"
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            return
+        }
+        $state.Accepted = $true
+        $dialog.Close()
+    }.GetNewClosure())
+    $clearHotkeyButton.Add_Click({
+        $state.Modifiers = 0
+        $state.KeyCode = 0
+        $state.Accepted = $true
+        $dialog.Close()
+    }.GetNewClosure())
+    $cancelHotkeyButton.Add_Click({ $dialog.Close() })
+    $dialog.Add_Shown({
+        [AudioSwitchNative.WindowEffects]::EnableSolidDark($dialog.Handle)
+        [AudioSwitchNative.WindowEffects]::ApplyIdentityAndIcon($dialog, $appIcon)
+        $dialog.Invalidate($true)
+        $dialog.Update()
+        $dialog.Activate()
+    })
+
+    if (-not [string]::IsNullOrWhiteSpace($PreviewPath)) {
+        $dialog.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+        $dialog.Location = New-Object System.Drawing.Point(-32000, -32000)
+        $dialog.Show()
+        [System.Windows.Forms.Application]::DoEvents()
+        $dialog.Invalidate($true)
+        $dialog.Update()
+        $dialogPreview = New-Object System.Drawing.Bitmap($dialog.Width, $dialog.Height)
+        $dialog.DrawToBitmap($dialogPreview, (New-Object System.Drawing.Rectangle(0, 0, $dialog.Width, $dialog.Height)))
+        $dialogPreview.Save($PreviewPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        $dialogPreview.Dispose()
+        $dialog.Hide()
+        $dialog.Dispose()
+        return
+    }
+
+    [void]$dialog.ShowDialog($form)
+    if ($state.Accepted) {
+        $profile | Add-Member -NotePropertyName HotkeyModifiers -NotePropertyValue ([int]$state.Modifiers) -Force
+        $profile | Add-Member -NotePropertyName HotkeyKey -NotePropertyValue ([int]$state.KeyCode) -Force
+        Save-Profiles
+        $failed = @(Register-ProfileHotkeys)
+        Render-Profiles
+        Rebuild-TrayMenu
+        if ($failed -contains [string]$profile.Name) {
+            Set-Status "快捷键已保存，但该组合正被其他程序占用" $true
+        } elseif ($state.KeyCode -gt 0) {
+            Set-Status "已为「$($profile.Name)」设置快捷键：$(Get-HotkeyDisplay $state.Modifiers $state.KeyCode)"
+        } else {
+            Set-Status "已清除「$($profile.Name)」的快捷键"
+        }
+    }
+    $dialog.Dispose()
+}
+
+function Update-ResponsiveLayout {
+    if ($null -ne $currentPanel -and $null -ne $outputTile -and $null -ne $inputTile) {
+        $panelWidth = [Math]::Max(720, $currentPanel.ClientSize.Width)
+        $tileWidth = [Math]::Floor(($panelWidth - 52) / 2)
+        $outputTile.Size = New-Object System.Drawing.Size($tileWidth, 46)
+        $inputTile.Location = New-Object System.Drawing.Point(($tileWidth + 36), 34)
+        $inputTile.Size = New-Object System.Drawing.Size($tileWidth, 46)
+        $currentOutputLabel.Width = [Math]::Max(180, $tileWidth - 68)
+        $currentInputLabel.Width = [Math]::Max(180, $tileWidth - 68)
+        $routeBadge.Location = New-Object System.Drawing.Point(($panelWidth - $routeBadge.Width - 16), 10)
+    }
+
+    if ($null -ne $createPanel -and $null -ne $profileNameBox -and $null -ne $saveButton) {
+        $panelWidth = [Math]::Max(720, $createPanel.ClientSize.Width)
+        $padding = 16
+        $gap = 12
+        $nameWidth = 160
+        $saveWidth = 104
+        $comboWidth = [Math]::Floor(($panelWidth - ($padding * 2) - $nameWidth - $saveWidth - ($gap * 3)) / 2)
+        $outputX = $padding + $nameWidth + $gap
+        $inputX = $outputX + $comboWidth + $gap
+        $saveX = $panelWidth - $padding - $saveWidth
+        $outHint.Location = New-Object System.Drawing.Point($outputX, 11)
+        $outputCombo.Location = New-Object System.Drawing.Point($outputX, 34)
+        $outputCombo.Width = $comboWidth
+        $inHint.Location = New-Object System.Drawing.Point($inputX, 11)
+        $inputCombo.Location = New-Object System.Drawing.Point($inputX, 34)
+        $inputCombo.Width = $comboWidth
+        $saveButton.Location = New-Object System.Drawing.Point($saveX, 33)
+    }
+}
+
 function Update-ProfileScroll {
     if ($null -eq $profilesViewport -or $null -eq $profileScroll) { return }
-    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * 91) - 9 } else { 64 }
+    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * 105) - 9 } else { 64 }
     $profilePanel.Size = New-Object System.Drawing.Size(($profilesViewport.ClientSize.Width - 20), ([Math]::Max($profilesViewport.ClientSize.Height, $contentHeight)))
     $profileScroll.LargeChange = [Math]::Max(1, $profilesViewport.ClientSize.Height)
     $profileScroll.Maximum = [Math]::Max(0, $contentHeight - $profilesViewport.ClientSize.Height)
@@ -974,45 +1423,77 @@ function Render-Profiles {
     foreach ($profile in @($script:Profiles)) {
         $card = New-Object AudioSwitchNative.AcrylicPanel
         $cardWidth = [Math]::Max(730, $profilePanel.ClientSize.Width - 8)
-        $card.Size = New-Object System.Drawing.Size($cardWidth, 82)
+        $actionLeft = $cardWidth - 236
+        $inputStart = 20 + [Math]::Floor(($actionLeft - 32) / 2)
+        $card.Size = New-Object System.Drawing.Size($cardWidth, 96)
         $card.CornerRadius = 12
         $card.FillColor = [System.Drawing.Color]::FromArgb(205, 22, 32, 48)
         $card.BorderColor = [System.Drawing.Color]::FromArgb(85, 58, 76, 99)
         $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 9)
 
         $statusDot = New-Label '●' 7
-        $statusDot.Location = New-Object System.Drawing.Point(17, 14)
+        $statusDot.Location = New-Object System.Drawing.Point(18, 16)
         $statusDot.ForeColor = $colorAccent
         $card.Controls.Add($statusDot)
 
         $name = New-Label $profile.Name 10.5 'Bold'
-        $name.Location = New-Object System.Drawing.Point(34, 11)
+        $name.Location = New-Object System.Drawing.Point(35, 13)
+        $name.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(240, $actionLeft - 70)), 24)
         $card.Controls.Add($name)
 
-        $outputCaption = New-Label '输出' 7.5 'Bold'
-        $outputCaption.ForeColor = $colorMuted
-        $outputCaption.Location = New-Object System.Drawing.Point(18, 48)
+        $actionDivider = New-Object System.Windows.Forms.Panel
+        $actionDivider.Location = New-Object System.Drawing.Point(($cardWidth - 236), 12)
+        $actionDivider.Size = New-Object System.Drawing.Size(1, 68)
+        $actionDivider.BackColor = $colorBorder
+        $card.Controls.Add($actionDivider)
+
+        $hotkeyButton = New-Object AudioSwitchNative.ModernButton
+        $hotkeyButton.Text = if ([int]$profile.HotkeyKey -gt 0) {
+            "快捷键  ·  $(Get-HotkeyDisplay ([int]$profile.HotkeyModifiers) ([int]$profile.HotkeyKey))"
+        } else {
+            '快捷键  ·  点击设置'
+        }
+        $hotkeyButton.Size = New-Object System.Drawing.Size(200, 29)
+        $hotkeyButton.Location = New-Object System.Drawing.Point(($cardWidth - 218), 10)
+        $hotkeyButton.FillColor = $colorInput
+        $hotkeyButton.HoverFillColor = $colorElevated
+        $hotkeyButton.PressedFillColor = $colorSurface
+        $hotkeyButton.BorderColor = $colorBorder
+        $hotkeyButton.CornerRadius = 8
+        $hotkeyButton.ForeColor = if ([int]$profile.HotkeyKey -gt 0) { $colorAccent } else { $colorMuted }
+        $hotkeyButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]7.6, [System.Drawing.FontStyle]::Regular)
+        $capturedHotkeyProfile = $profile
+        $hotkeyButton.Add_Click({ Show-HotkeyEditor $capturedHotkeyProfile }.GetNewClosure())
+        $card.Controls.Add($hotkeyButton)
+
+        $outputCaption = New-Label 'OUT' 7.5 'Bold'
+        $outputCaption.ForeColor = $colorAccent
+        $outputCaption.Location = New-Object System.Drawing.Point(20, 59)
         $card.Controls.Add($outputCaption)
         $outputValue = New-Label $profile.OutputName 8.2
         $outputValue.ForeColor = $colorTextSecondary
-        $outputValue.Location = New-Object System.Drawing.Point(56, 46)
-        $outputValue.MaximumSize = New-Object System.Drawing.Size(230, 20)
+        $outputValue.Location = New-Object System.Drawing.Point(58, 57)
+        $outputValue.AutoSize = $false
+        $outputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $inputStart - 76)), 20)
+        $outputValue.AutoEllipsis = $true
         $card.Controls.Add($outputValue)
 
-        $inputCaption = New-Label '输入' 7.5 'Bold'
-        $inputCaption.ForeColor = $colorMuted
-        $inputCaption.Location = New-Object System.Drawing.Point(300, 48)
+        $inputCaption = New-Label 'IN' 7.5 'Bold'
+        $inputCaption.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+        $inputCaption.Location = New-Object System.Drawing.Point($inputStart, 59)
         $card.Controls.Add($inputCaption)
         $inputValue = New-Label $profile.InputName 8.2
         $inputValue.ForeColor = $colorTextSecondary
-        $inputValue.Location = New-Object System.Drawing.Point(338, 46)
-        $inputValue.MaximumSize = New-Object System.Drawing.Size(220, 20)
+        $inputValue.Location = New-Object System.Drawing.Point(($inputStart + 38), 57)
+        $inputValue.AutoSize = $false
+        $inputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - $inputStart - 56)), 20)
+        $inputValue.AutoEllipsis = $true
         $card.Controls.Add($inputValue)
 
         $switchButton = New-Object System.Windows.Forms.Button
-        $switchButton.Text = '切换到此方案'
-        $switchButton.Size = New-Object System.Drawing.Size(112, 36)
-        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 166), 23)
+        $switchButton.Text = '切换方案'
+        $switchButton.Size = New-Object System.Drawing.Size(158, 34)
+        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 218), 47)
         $switchButton.FlatStyle = 'Flat'
         $switchButton.FlatAppearance.BorderSize = 0
         $switchButton.BackColor = $colorAccent
@@ -1025,18 +1506,28 @@ function Render-Profiles {
 
         $deleteButton = New-Object System.Windows.Forms.Button
         $deleteButton.Text = '×'
-        $deleteButton.Size = New-Object System.Drawing.Size(36, 36)
-        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 44), 23)
+        $deleteButton.AccessibleName = '删除方案'
+        $deleteButton.Size = New-Object System.Drawing.Size(34, 34)
+        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 52), 47)
         $deleteButton.FlatStyle = 'Flat'
         $deleteButton.FlatAppearance.BorderSize = 0
-        $deleteButton.BackColor = $colorElevated
-        $deleteButton.ForeColor = $colorMuted
-        $deleteButton.Font = New-Object System.Drawing.Font('Segoe UI', 13)
+        $deleteButton.BackColor = [System.Drawing.Color]::FromArgb(220, 55, 66)
+        $deleteButton.ForeColor = [System.Drawing.Color]::FromArgb(255, 245, 246)
+        $deleteButton.Font = [System.Drawing.Font]::new('Segoe UI', [single]12, [System.Drawing.FontStyle]::Bold)
         [AudioSwitchNative.WindowEffects]::RoundControl($deleteButton, 9)
         $capturedName = [string]$profile.Name
         $deleteButton.Add_Click({
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                "确定要删除音频方案「$capturedName」吗？`r`n`r`n这不会删除音频设备，但该方案和它的快捷键将一并移除。",
+                '删除音频方案',
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning,
+                [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+            )
+            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
             $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $capturedName })
             Save-Profiles
+            [void](Register-ProfileHotkeys)
             Render-Profiles
             Rebuild-TrayMenu
             Set-Status "已删除方案「$capturedName」"
@@ -1127,6 +1618,9 @@ function Rebuild-TrayMenu {
         $item.Text = [string]$profile.Name
         $item.Tag = $profile
         $item.ToolTipText = "输出：$($profile.OutputName)`n输入：$($profile.InputName)"
+        if ([int]$profile.HotkeyKey -gt 0) {
+            $item.ShortcutKeyDisplayString = Get-HotkeyDisplay ([int]$profile.HotkeyModifiers) ([int]$profile.HotkeyKey)
+        }
         $item.Padding = New-Object System.Windows.Forms.Padding(12, 7, 12, 7)
         $captured = $profile
         $item.Add_Click({ Switch-Profile $captured }.GetNewClosure())
@@ -1206,7 +1700,7 @@ $colorTextSecondary = [System.Drawing.Color]::FromArgb(190, 201, 216)
 $colorMuted = [System.Drawing.Color]::FromArgb(133, 149, 170)
 $colorAccent = [System.Drawing.Color]::FromArgb(89, 232, 159)
 
-$form = New-Object System.Windows.Forms.Form
+$form = New-Object AudioSwitchNative.BufferedForm
 $form.Text = 'AUDIO ROUTER'
 $form.ClientSize = New-Object System.Drawing.Size(820, 716)
 $form.MinimumSize = New-Object System.Drawing.Size(836, 700)
@@ -1217,23 +1711,29 @@ $form.ForeColor = $colorTextPrimary
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $form.Icon = $appIcon
 
-$brandTitle = New-Label 'AUDIO ROUTER' 21 'Bold'
-$brandTitle.Location = New-Object System.Drawing.Point(22, 25)
-$brandTitle.ForeColor = $colorTextPrimary
-$form.Controls.Add($brandTitle)
+$brandAudio = New-Label 'A U D I O' 7.2 'Bold'
+$brandAudio.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]7.2, [System.Drawing.FontStyle]::Bold)
+$brandAudio.Location = New-Object System.Drawing.Point(26, 18)
+$brandAudio.ForeColor = $colorAccent
+$form.Controls.Add($brandAudio)
+$brandRouter = New-Label 'ROUTER' 21.5 'Bold'
+$brandRouter.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]21.5, [System.Drawing.FontStyle]::Bold)
+$brandRouter.Location = New-Object System.Drawing.Point(23, 31)
+$brandRouter.ForeColor = $colorTextPrimary
+$form.Controls.Add($brandRouter)
 
-$refreshButton = New-Object System.Windows.Forms.Button
+$refreshButton = New-Object AudioSwitchNative.ModernButton
 $refreshButton.Text = '刷新设备'
 $refreshButton.Size = New-Object System.Drawing.Size(124, 36)
 $refreshButton.Location = New-Object System.Drawing.Point(672, 25)
 $refreshButton.Anchor = 'Top,Right'
-$refreshButton.FlatStyle = 'Flat'
-$refreshButton.FlatAppearance.BorderColor = $colorBorder
-$refreshButton.FlatAppearance.BorderSize = 1
-$refreshButton.BackColor = $colorSurface
+$refreshButton.FillColor = $colorSurface
+$refreshButton.HoverFillColor = $colorElevated
+$refreshButton.PressedFillColor = $colorInput
+$refreshButton.BorderColor = $colorBorder
+$refreshButton.CornerRadius = 9
 $refreshButton.ForeColor = $colorTextPrimary
 $refreshButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
-[AudioSwitchNative.WindowEffects]::RoundControl($refreshButton, 9)
 $refreshButton.Add_Click({ Refresh-Devices })
 $form.Controls.Add($refreshButton)
 
@@ -1245,33 +1745,61 @@ $currentPanel.CornerRadius = 14
 $currentPanel.FillColor = [System.Drawing.Color]::FromArgb(196, 22, 32, 48)
 $currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 65, 84, 108)
 $form.Controls.Add($currentPanel)
-$now = New-Label '当前正在使用' 8 'Bold'
+$now = New-Label 'ACTIVE AUDIO ROUTE' 7.5 'Bold'
 $now.Location = New-Object System.Drawing.Point(16, 10)
 $now.ForeColor = $colorAccent
 $currentPanel.Controls.Add($now)
-$divider = New-Object System.Windows.Forms.Panel
-$divider.Location = New-Object System.Drawing.Point(385, 35)
-$divider.Size = New-Object System.Drawing.Size(1, 42)
-$divider.BackColor = $colorBorder
-$currentPanel.Controls.Add($divider)
-$outCaption = New-Label '输出设备' 7.5 'Bold'
-$outCaption.Location = New-Object System.Drawing.Point(16, 38)
+
+$routeBadge = New-Label '●  WINDOWS DEFAULT' 7.2 'Bold'
+$routeBadge.Location = New-Object System.Drawing.Point(624, 10)
+$routeBadge.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$currentPanel.Controls.Add($routeBadge)
+
+$outputTile = New-Object AudioSwitchNative.AcrylicPanel
+$outputTile.Location = New-Object System.Drawing.Point(16, 34)
+$outputTile.Size = New-Object System.Drawing.Size(360, 46)
+$outputTile.CornerRadius = 10
+$outputTile.FillColor = [System.Drawing.Color]::FromArgb(188, 14, 24, 38)
+$outputTile.BorderColor = [System.Drawing.Color]::FromArgb(80, 57, 78, 102)
+$currentPanel.Controls.Add($outputTile)
+$outputTag = New-Label 'OUT' 7.5 'Bold'
+$outputTag.Location = New-Object System.Drawing.Point(12, 15)
+$outputTag.ForeColor = $colorAccent
+$outputTile.Controls.Add($outputTag)
+$outCaption = New-Label '输出设备 · SYSTEM DEFAULT' 6.8 'Bold'
+$outCaption.Location = New-Object System.Drawing.Point(54, 5)
 $outCaption.ForeColor = $colorMuted
-$currentPanel.Controls.Add($outCaption)
+$outputTile.Controls.Add($outCaption)
 $currentOutputLabel = New-Label '读取中…' 9.5 'Bold'
-$currentOutputLabel.Location = New-Object System.Drawing.Point(16, 58)
+$currentOutputLabel.Location = New-Object System.Drawing.Point(54, 21)
 $currentOutputLabel.ForeColor = $colorTextPrimary
-$currentOutputLabel.MaximumSize = New-Object System.Drawing.Size(345, 24)
-$currentPanel.Controls.Add($currentOutputLabel)
-$inCaption = New-Label '输入设备' 7.5 'Bold'
-$inCaption.Location = New-Object System.Drawing.Point(406, 38)
+$currentOutputLabel.AutoSize = $false
+$currentOutputLabel.Size = New-Object System.Drawing.Size(292, 20)
+$currentOutputLabel.AutoEllipsis = $true
+$outputTile.Controls.Add($currentOutputLabel)
+
+$inputTile = New-Object AudioSwitchNative.AcrylicPanel
+$inputTile.Location = New-Object System.Drawing.Point(396, 34)
+$inputTile.Size = New-Object System.Drawing.Size(360, 46)
+$inputTile.CornerRadius = 10
+$inputTile.FillColor = [System.Drawing.Color]::FromArgb(188, 14, 24, 38)
+$inputTile.BorderColor = [System.Drawing.Color]::FromArgb(80, 57, 78, 102)
+$currentPanel.Controls.Add($inputTile)
+$inputTag = New-Label 'IN' 7.5 'Bold'
+$inputTag.Location = New-Object System.Drawing.Point(12, 15)
+$inputTag.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$inputTile.Controls.Add($inputTag)
+$inCaption = New-Label '输入设备 · SYSTEM DEFAULT' 6.8 'Bold'
+$inCaption.Location = New-Object System.Drawing.Point(54, 5)
 $inCaption.ForeColor = $colorMuted
-$currentPanel.Controls.Add($inCaption)
+$inputTile.Controls.Add($inCaption)
 $currentInputLabel = New-Label '读取中…' 9.5 'Bold'
-$currentInputLabel.Location = New-Object System.Drawing.Point(406, 58)
+$currentInputLabel.Location = New-Object System.Drawing.Point(54, 21)
 $currentInputLabel.ForeColor = $colorTextPrimary
-$currentInputLabel.MaximumSize = New-Object System.Drawing.Size(345, 24)
-$currentPanel.Controls.Add($currentInputLabel)
+$currentInputLabel.AutoSize = $false
+$currentInputLabel.Size = New-Object System.Drawing.Size(292, 20)
+$currentInputLabel.AutoEllipsis = $true
+$inputTile.Controls.Add($currentInputLabel)
 
 $createLabel = New-Label '新建或更新方案' 10.5 'Bold'
 $createLabel.Location = New-Object System.Drawing.Point(24, 192)
@@ -1348,6 +1876,9 @@ $saveButton.Add_Click({
     $name = $profileNameBox.Text.Trim()
     if (-not $name) { Set-Status '请给方案起个名字，例如「耳机」或「音箱」' $true; return }
     if (-not $outputCombo.SelectedItem -or -not $inputCombo.SelectedItem) { Set-Status '请同时选择输出和输入设备' $true; return }
+    $existingProfile = @($script:Profiles | Where-Object { $_.Name -eq $name } | Select-Object -First 1)
+    $existingModifiers = if ($existingProfile.Count) { [int]$existingProfile[0].HotkeyModifiers } else { 0 }
+    $existingKey = if ($existingProfile.Count) { [int]$existingProfile[0].HotkeyKey } else { 0 }
     $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $name })
     $script:Profiles += [PSCustomObject]@{
         Name = $name
@@ -1355,8 +1886,11 @@ $saveButton.Add_Click({
         OutputName = $outputCombo.SelectedItem.Name
         InputId = $inputCombo.SelectedItem.Id
         InputName = $inputCombo.SelectedItem.Name
+        HotkeyModifiers = $existingModifiers
+        HotkeyKey = $existingKey
     }
     Save-Profiles
+    [void](Register-ProfileHotkeys)
     Render-Profiles
     Rebuild-TrayMenu
     $profileNameBox.Clear()
@@ -1488,6 +2022,20 @@ $statusLabel.ForeColor = $colorAccent
 $statusLabel.MaximumSize = New-Object System.Drawing.Size(250, 20)
 $settingsPanel.Controls.Add($statusLabel)
 
+$responsiveTimer = New-Object System.Windows.Forms.Timer
+$responsiveTimer.Interval = 120
+$responsiveTimer.Add_Tick({
+    $responsiveTimer.Stop()
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+        Update-ResponsiveLayout
+        Render-Profiles
+        $form.Invalidate($true)
+        $form.Update()
+    }
+})
+$currentPanel.Add_Resize({ Update-ResponsiveLayout })
+$createPanel.Add_Resize({ Update-ResponsiveLayout })
+
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $trayMenu.Padding = New-Object System.Windows.Forms.Padding(6)
@@ -1508,6 +2056,13 @@ $trayIcon.ContextMenuStrip = $trayMenu
 $trayIcon.Visible = $true
 $trayIcon.Add_DoubleClick({ Show-MainWindow })
 
+$script:HotkeyManager = New-Object AudioSwitchNative.GlobalHotkeyManager
+$script:HotkeyManager.Add_HotkeyPressed({
+    param($sender, $eventArgs)
+    $targetProfile = @($script:Profiles | Where-Object { $_.Name -eq $eventArgs.ProfileName } | Select-Object -First 1)
+    if ($targetProfile.Count) { Switch-Profile $targetProfile[0] }
+})
+
 $form.Add_FormClosing({
     param($sender, $eventArgs)
     if (-not $script:ClosingForReal -and $eventArgs.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) {
@@ -1518,25 +2073,55 @@ $form.Add_FormClosing({
 $form.Add_Resize({
     if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
         Hide-ToTray $false
+    } else {
+        Update-ResponsiveLayout
+        $responsiveTimer.Stop()
+        $responsiveTimer.Start()
     }
 })
+$form.Add_ResizeEnd({
+    $responsiveTimer.Stop()
+    Update-ResponsiveLayout
+    Render-Profiles
+    $form.Invalidate($true)
+    $form.Update()
+})
 $form.Add_Shown({
-    [AudioSwitchNative.WindowEffects]::EnableAcrylic($form.Handle, $true)
+    [AudioSwitchNative.WindowEffects]::EnableSolidDark($form.Handle)
+    [AudioSwitchNative.WindowEffects]::ApplyIdentityAndIcon($form, $appIcon)
+    Update-ResponsiveLayout
     if ($script:StartHidden -or [bool]$script:Settings.StartMinimized) {
         $script:StartHidden = $false
         Hide-ToTray $false
     }
 })
 $form.Add_FormClosed({
+    $responsiveTimer.Stop()
+    $responsiveTimer.Dispose()
+    if ($null -ne $script:HotkeyManager) { $script:HotkeyManager.Dispose(); $script:HotkeyManager = $null }
     $trayIcon.Visible = $false
     $trayIcon.Dispose()
     if ($script:OwnsAppIcon) { $appIcon.Dispose() }
 })
 
 Load-Profiles
+[void](Register-ProfileHotkeys)
 Render-Profiles
 Rebuild-TrayMenu
 Refresh-Devices
+if (-not [string]::IsNullOrWhiteSpace($HotkeyPreviewPath)) {
+    $previewProfile = @($script:Profiles | Select-Object -First 1)
+    if (-not $previewProfile.Count) {
+        $previewProfile = @([PSCustomObject]@{ Name = '示例方案'; HotkeyModifiers = 0; HotkeyKey = 0 })
+    }
+    Show-HotkeyEditor $previewProfile[0] $HotkeyPreviewPath
+    if ($null -ne $script:HotkeyManager) { $script:HotkeyManager.Dispose(); $script:HotkeyManager = $null }
+    $trayIcon.Visible = $false
+    $trayIcon.Dispose()
+    if ($script:OwnsAppIcon) { $appIcon.Dispose() }
+    $form.Dispose()
+    exit 0
+}
 if (-not [string]::IsNullOrWhiteSpace($UiPreviewPath)) {
     $script:StartHidden = $false
     $script:Settings.StartMinimized = $false
@@ -1545,12 +2130,21 @@ if (-not [string]::IsNullOrWhiteSpace($UiPreviewPath)) {
     $form.ShowInTaskbar = $false
     $form.Show()
     [System.Windows.Forms.Application]::DoEvents()
+    if ($UiPreviewWidth -gt 0 -and $UiPreviewHeight -gt 0) {
+        $form.ClientSize = New-Object System.Drawing.Size($UiPreviewWidth, $UiPreviewHeight)
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    Update-ResponsiveLayout
+    Render-Profiles
+    $form.Invalidate($true)
+    $form.Update()
     $form.PerformLayout()
     $preview = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
     $form.DrawToBitmap($preview, (New-Object System.Drawing.Rectangle(0, 0, $form.ClientSize.Width, $form.ClientSize.Height)))
     $preview.Save($UiPreviewPath, [System.Drawing.Imaging.ImageFormat]::Png)
     $preview.Dispose()
     $form.Hide()
+    if ($null -ne $script:HotkeyManager) { $script:HotkeyManager.Dispose(); $script:HotkeyManager = $null }
     $trayIcon.Visible = $false
     $trayIcon.Dispose()
     if ($script:OwnsAppIcon) { $appIcon.Dispose() }
