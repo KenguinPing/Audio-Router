@@ -396,6 +396,12 @@ namespace AudioSwitchNative
     public sealed class ModernTextBox : UserControl
     {
         readonly TextBox editor = new TextBox();
+        string placeholderText = String.Empty;
+        const int EM_SETCUEBANNER = 0x1501;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr showWhileFocused, string text);
+
         public Color FieldColor { get; set; }
         public Color BorderColor { get; set; }
         public Color ActiveBorderColor { get; set; }
@@ -404,6 +410,18 @@ namespace AudioSwitchNative
         {
             get { return editor.Text; }
             set { editor.Text = value ?? String.Empty; }
+        }
+
+        public string PlaceholderText
+        {
+            get { return placeholderText; }
+            set { placeholderText = value ?? String.Empty; ApplyPlaceholder(); }
+        }
+
+        void ApplyPlaceholder()
+        {
+            if (editor.IsHandleCreated)
+                SendMessage(editor.Handle, EM_SETCUEBANNER, new IntPtr(1), placeholderText);
         }
 
         public ModernTextBox()
@@ -419,6 +437,7 @@ namespace AudioSwitchNative
             editor.ForeColor = Color.FromArgb(244, 247, 251);
             editor.Location = new Point(10, 7);
             editor.TextChanged += delegate { base.Text = editor.Text; };
+            editor.HandleCreated += delegate { ApplyPlaceholder(); };
             editor.GotFocus += delegate { Invalidate(); };
             editor.LostFocus += delegate { Invalidate(); };
             Controls.Add(editor);
@@ -1688,31 +1707,35 @@ function Update-ResponsiveLayout {
     if ($null -ne $createPanel -and $null -ne $profileNameBox -and $null -ne $saveButton) {
         $panelWidth = [Math]::Max(720, $createPanel.ClientSize.Width)
         $padding = 16
-        $gap = 12
-        $nameWidth = 160
+        $sectionGap = 12
+        $labelGap = 6
+        $nameWidth = 150
+        $outLabelWidth = 30
+        $inLabelWidth = 22
         $saveWidth = 104
-        $comboWidth = [Math]::Floor(($panelWidth - ($padding * 2) - $nameWidth - $saveWidth - ($gap * 3)) / 2)
-        $outputX = $padding + $nameWidth + $gap
-        $inputX = $outputX + $comboWidth + $gap
+        $fixedWidth = ($padding * 2) + $nameWidth + $saveWidth + $outLabelWidth + $inLabelWidth + ($sectionGap * 3) + ($labelGap * 2)
+        $comboWidth = [Math]::Floor(($panelWidth - $fixedWidth) / 2)
+        $outLabelX = $padding + $nameWidth + $sectionGap
+        $outputX = $outLabelX + $outLabelWidth + $labelGap
+        $inLabelX = $outputX + $comboWidth + $sectionGap
+        $inputX = $inLabelX + $inLabelWidth + $labelGap
         $saveX = $panelWidth - $padding - $saveWidth
-        $outDirection.Location = New-Object System.Drawing.Point(($outputX + 8), 7)
-        $outHint.Location = New-Object System.Drawing.Point(($outputX + 40), 8)
-        $outHint.Width = [Math]::Max(80, $comboWidth - 48)
-        $outputCombo.Location = New-Object System.Drawing.Point($outputX, 34)
+        $profileNameBox.Location = New-Object System.Drawing.Point($padding, 37)
+        $profileNameBox.Width = $nameWidth
+        $outDirection.Location = New-Object System.Drawing.Point($outLabelX, 37)
+        $outputCombo.Location = New-Object System.Drawing.Point($outputX, 37)
         $outputCombo.Width = $comboWidth
-        $inDirection.Location = New-Object System.Drawing.Point(($inputX + 8), 7)
-        $inHint.Location = New-Object System.Drawing.Point(($inputX + 33), 8)
-        $inHint.Width = [Math]::Max(80, $comboWidth - 41)
-        $inputCombo.Location = New-Object System.Drawing.Point($inputX, 34)
+        $inDirection.Location = New-Object System.Drawing.Point($inLabelX, 37)
+        $inputCombo.Location = New-Object System.Drawing.Point($inputX, 37)
         $inputCombo.Width = $comboWidth
-        $saveButton.Location = New-Object System.Drawing.Point($saveX, 33)
+        $saveButton.Location = New-Object System.Drawing.Point($saveX, 37)
     }
 }
 
 function Update-ProfileScroll {
     if ($null -eq $profilesViewport -or $null -eq $profileScroll) { return }
     $cardHeight = Get-ProfileCardHeight
-    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * ($cardHeight + 9)) - 9 } else { 64 }
+    $contentHeight = if ($script:Profiles.Count -gt 0) { ($script:Profiles.Count * ($cardHeight + 8)) - 8 } else { 64 }
     $needsScroll = ($contentHeight -gt $profilesViewport.ClientSize.Height)
     $scrollGutter = if ($needsScroll) { 20 } else { 0 }
     $profilePanel.Size = New-Object System.Drawing.Size(($profilesViewport.ClientSize.Width - $scrollGutter), ([Math]::Max($profilesViewport.ClientSize.Height, $contentHeight)))
@@ -1725,7 +1748,7 @@ function Update-ProfileScroll {
 
 function Get-ProfileCardHeight {
     # Keep each profile visually compact instead of stretching it with the window.
-    return 104
+    return 96
 }
 
 function Move-ProfileToDropIndex([string]$ProfileName, [int]$DropIndex) {
@@ -1748,6 +1771,32 @@ function Move-ProfileToDropIndex([string]$ProfileName, [int]$DropIndex) {
     Render-Profiles
     Rebuild-TrayMenu
     Set-Status "已调整方案「$ProfileName」的排列顺序"
+}
+
+function Remove-Profile([string]$ProfileName) {
+    if ([string]::IsNullOrWhiteSpace($ProfileName)) { return }
+    $target = @($script:Profiles | Where-Object { $_.Name -eq $ProfileName } | Select-Object -First 1)
+    if (-not $target.Count) {
+        Set-Status "未找到要删除的方案「$ProfileName」" $true
+        return
+    }
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        $form,
+        "确定要删除音频方案「$ProfileName」吗？`r`n`r`n这不会删除音频设备，但该方案和它的快捷键将一并移除。",
+        '删除音频方案',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+    )
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $ProfileName })
+    Save-Profiles
+    [void](Register-ProfileHotkeys)
+    Render-Profiles
+    Rebuild-TrayMenu
+    Set-Status "已删除方案「$ProfileName」"
 }
 
 function Get-ProfileDragText($DataObject) {
@@ -1851,15 +1900,15 @@ function Render-Profiles {
         $card.FillColor = if ($isActive) { [System.Drawing.Color]::FromArgb(190, 31, 59, 56) } else { [System.Drawing.Color]::FromArgb(164, 43, 54, 65) }
         $card.BorderColor = if ($isActive) { [System.Drawing.Color]::FromArgb(225, 104, 231, 179) } else { [System.Drawing.Color]::FromArgb(82, 79, 95, 111) }
         $card.BorderWidth = if ($isActive) { [single]2 } else { [single]1 }
-        $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 9)
+        $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
         $card.Tag = $profile
         $card.Cursor = [System.Windows.Forms.Cursors]::SizeNS
 
         $dragHandle = New-Label '≡  •' 10.5 'Bold'
         $dragHandle.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]10.5, [System.Drawing.FontStyle]::Bold)
         $dragHandle.AutoSize = $false
-        $dragHandle.Location = New-Object System.Drawing.Point(14, 12)
-        $dragHandle.Size = New-Object System.Drawing.Size(29, 30)
+        $dragHandle.Location = New-Object System.Drawing.Point(14, 7)
+        $dragHandle.Size = New-Object System.Drawing.Size(29, 28)
         $dragHandle.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
         $dragHandle.ForeColor = if ($isActive) { $colorAccent } else { $colorMuted }
         $dragHandle.Cursor = [System.Windows.Forms.Cursors]::SizeNS
@@ -1868,8 +1917,8 @@ function Render-Profiles {
 
         $name = New-Label $profile.Name 10.5 'Bold'
         $name.AutoSize = $false
-        $name.Location = New-Object System.Drawing.Point(45, 12)
-        $name.Size = New-Object System.Drawing.Size(([Math]::Max(200, $(if ($isActive) { $actionLeft - 190 } else { $actionLeft - 80 }))), 30)
+        $name.Location = New-Object System.Drawing.Point(45, 7)
+        $name.Size = New-Object System.Drawing.Size(([Math]::Max(200, $(if ($isActive) { $actionLeft - 190 } else { $actionLeft - 80 }))), 28)
         $name.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
         $name.AutoEllipsis = $true
         $name.Cursor = [System.Windows.Forms.Cursors]::Hand
@@ -1881,8 +1930,8 @@ function Render-Profiles {
         if ($isActive) {
             $activeBadge = New-Label '●  正在使用' 8 'Bold'
             $activeBadge.AutoSize = $false
-            $activeBadge.Location = New-Object System.Drawing.Point(($actionLeft - 112), 12)
-            $activeBadge.Size = New-Object System.Drawing.Size(108, 30)
+            $activeBadge.Location = New-Object System.Drawing.Point(($actionLeft - 112), 7)
+            $activeBadge.Size = New-Object System.Drawing.Size(108, 28)
             $activeBadge.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
             $activeBadge.ForeColor = $colorAccent
             $card.Controls.Add($activeBadge)
@@ -1897,7 +1946,7 @@ function Render-Profiles {
         $card.Controls.Add($actionDivider)
 
         $detailDivider = New-Object System.Windows.Forms.Panel
-        $detailDivider.Location = New-Object System.Drawing.Point(20, 45)
+        $detailDivider.Location = New-Object System.Drawing.Point(20, 39)
         $detailDivider.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - 40)), 1)
         $detailDivider.BackColor = $dividerColor
         $card.Controls.Add($detailDivider)
@@ -1909,7 +1958,7 @@ function Render-Profiles {
             '快捷键  ·  点击设置'
         }
         $hotkeyButton.Size = New-Object System.Drawing.Size(232, 30)
-        $hotkeyButton.Location = New-Object System.Drawing.Point(($cardWidth - 248), 16)
+        $hotkeyButton.Location = New-Object System.Drawing.Point(($cardWidth - 248), 10)
         $hotkeyButton.FillColor = $colorInput
         $hotkeyButton.HoverFillColor = $colorElevated
         $hotkeyButton.PressedFillColor = $colorSurface
@@ -1923,11 +1972,11 @@ function Render-Profiles {
 
         $outputCaption = New-Label 'OUT' 8 'Bold'
         $outputCaption.ForeColor = $colorAccent
-        $outputCaption.Location = New-Object System.Drawing.Point(20, 54)
+        $outputCaption.Location = New-Object System.Drawing.Point(20, 47)
         $card.Controls.Add($outputCaption)
         $outputValue = New-Label $profile.OutputName 8.4
         $outputValue.ForeColor = if ($isActive) { $colorTextPrimary } else { $colorTextSecondary }
-        $outputValue.Location = New-Object System.Drawing.Point(20, 76)
+        $outputValue.Location = New-Object System.Drawing.Point(20, 68)
         $outputValue.AutoSize = $false
         $outputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $inputStart - 40)), 20)
         $outputValue.AutoEllipsis = $true
@@ -1939,11 +1988,11 @@ function Render-Profiles {
 
         $inputCaption = New-Label 'IN' 8 'Bold'
         $inputCaption.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
-        $inputCaption.Location = New-Object System.Drawing.Point($inputStart, 54)
+        $inputCaption.Location = New-Object System.Drawing.Point($inputStart, 47)
         $card.Controls.Add($inputCaption)
         $inputValue = New-Label $profile.InputName 8.4
         $inputValue.ForeColor = if ($isActive) { $colorTextPrimary } else { $colorTextSecondary }
-        $inputValue.Location = New-Object System.Drawing.Point($inputStart, 76)
+        $inputValue.Location = New-Object System.Drawing.Point($inputStart, 68)
         $inputValue.AutoSize = $false
         $inputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - $inputStart - 20)), 20)
         $inputValue.AutoEllipsis = $true
@@ -1956,7 +2005,7 @@ function Render-Profiles {
         $switchButton = New-Object AudioSwitchNative.ModernButton
         $switchButton.Text = if ($isActive) { '当前方案' } else { '切换方案' }
         $switchButton.Size = New-Object System.Drawing.Size(182, 42)
-        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 248), 52)
+        $switchButton.Location = New-Object System.Drawing.Point(($cardWidth - 248), 46)
         $switchButton.FillColor = if ($isActive) { [System.Drawing.Color]::FromArgb(40, 72, 64) } else { $colorAccent }
         $switchButton.HoverFillColor = if ($isActive) { [System.Drawing.Color]::FromArgb(40, 72, 64) } else { [System.Drawing.Color]::FromArgb(119, 239, 193) }
         $switchButton.PressedFillColor = if ($isActive) { [System.Drawing.Color]::FromArgb(40, 72, 64) } else { [System.Drawing.Color]::FromArgb(81, 205, 151) }
@@ -1977,7 +2026,7 @@ function Render-Profiles {
         $deleteButton.Text = ''
         $deleteButton.AccessibleName = '删除方案'
         $deleteButton.Size = New-Object System.Drawing.Size(44, 42)
-        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 60), 52)
+        $deleteButton.Location = New-Object System.Drawing.Point(($cardWidth - 60), 46)
         $deleteButton.FillColor = [System.Drawing.Color]::FromArgb(220, 55, 66)
         $deleteButton.HoverFillColor = [System.Drawing.Color]::FromArgb(236, 72, 82)
         $deleteButton.PressedFillColor = [System.Drawing.Color]::FromArgb(187, 43, 54)
@@ -1987,23 +2036,11 @@ function Render-Profiles {
         $deleteButton.GlyphColor = [System.Drawing.Color]::FromArgb(255, 245, 246)
         $deleteButton.ForeColor = [System.Drawing.Color]::FromArgb(255, 245, 246)
         $deleteButton.Font = [System.Drawing.Font]::new('Segoe UI', [single]12, [System.Drawing.FontStyle]::Bold)
-        $capturedName = [string]$profile.Name
+        $deleteButton.Tag = [string]$profile.Name
         $deleteButton.Add_Click({
-            $answer = [System.Windows.Forms.MessageBox]::Show(
-                "确定要删除音频方案「$capturedName」吗？`r`n`r`n这不会删除音频设备，但该方案和它的快捷键将一并移除。",
-                '删除音频方案',
-                [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                [System.Windows.Forms.MessageBoxIcon]::Warning,
-                [System.Windows.Forms.MessageBoxDefaultButton]::Button2
-            )
-            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-            $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $capturedName })
-            Save-Profiles
-            [void](Register-ProfileHotkeys)
-            Render-Profiles
-            Rebuild-TrayMenu
-            Set-Status "已删除方案「$capturedName」"
-        }.GetNewClosure())
+            param($sender, $eventArgs)
+            Remove-Profile ([string]$sender.Tag)
+        })
         $card.Controls.Add($deleteButton)
 
         # The card background and its descriptive labels are all valid drag
@@ -2208,7 +2245,7 @@ $colorAccent = [System.Drawing.Color]::FromArgb(104, 231, 179)
 
 $form = New-Object AudioSwitchNative.BufferedForm
 $form.Text = 'AUDIO ROUTER'
-$form.ClientSize = New-Object System.Drawing.Size(820, 780)
+$form.ClientSize = New-Object System.Drawing.Size(820, 726)
 $form.MinimumSize = New-Object System.Drawing.Size(836, 700)
 $form.StartPosition = 'CenterScreen'
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
@@ -2245,7 +2282,7 @@ $refreshButton.Add_Click({ Refresh-Devices })
 $form.Controls.Add($refreshButton)
 
 $currentPanel = New-Object AudioSwitchNative.AcrylicPanel
-$currentPanel.Location = New-Object System.Drawing.Point(24, 648)
+$currentPanel.Location = New-Object System.Drawing.Point(24, 594)
 $currentPanel.Size = New-Object System.Drawing.Size(772, 112)
 $currentPanel.Anchor = 'Bottom,Left,Right'
 $currentPanel.CornerRadius = 14
@@ -2308,73 +2345,59 @@ $currentInputLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $currentInputLabel.AutoEllipsis = $true
 $inputTile.Controls.Add($currentInputLabel)
 
-$createLabel = New-Label '新建或更新方案' 11 'Bold'
-$createLabel.Location = New-Object System.Drawing.Point(24, 72)
-$createLabel.ForeColor = $colorTextPrimary
-$form.Controls.Add($createLabel)
-$createHelp = New-Label '同名方案会自动更新' 7.5
-$createHelp.Location = New-Object System.Drawing.Point(158, 77)
-$createHelp.ForeColor = $colorMuted
-$form.Controls.Add($createHelp)
-
 $createPanel = New-Object AudioSwitchNative.AcrylicPanel
-$createPanel.Location = New-Object System.Drawing.Point(24, 100)
-$createPanel.Size = New-Object System.Drawing.Size(772, 76)
+$createPanel.Location = New-Object System.Drawing.Point(24, 70)
+$createPanel.Size = New-Object System.Drawing.Size(772, 80)
 $createPanel.Anchor = 'Top,Left,Right'
 $createPanel.CornerRadius = 14
 $createPanel.FillColor = [System.Drawing.Color]::FromArgb(164, 43, 54, 65)
 $createPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 84, 100, 116)
 $form.Controls.Add($createPanel)
 
-$nameHint = New-Label '方案名称' 7.5 'Bold'
-$nameHint.AutoSize = $false
-$nameHint.Location = New-Object System.Drawing.Point(24, 8)
-$nameHint.Size = New-Object System.Drawing.Size(144, 20)
-$nameHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$nameHint.ForeColor = $colorMuted
-$createPanel.Controls.Add($nameHint)
+$createLabel = New-Label '新建方案' 11 'Bold'
+$createLabel.AutoSize = $false
+$createLabel.Location = New-Object System.Drawing.Point(16, 7)
+$createLabel.Size = New-Object System.Drawing.Size(76, 26)
+$createLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$createLabel.ForeColor = $colorTextPrimary
+$createPanel.Controls.Add($createLabel)
+$createHelp = New-Label '同名方案会自动更新' 7.5
+$createHelp.AutoSize = $false
+$createHelp.Location = New-Object System.Drawing.Point(100, 7)
+$createHelp.Size = New-Object System.Drawing.Size(150, 26)
+$createHelp.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$createHelp.ForeColor = $colorMuted
+$createPanel.Controls.Add($createHelp)
+
 $outDirection = New-Label 'OUT' 7.5 'Bold'
 $outDirection.AutoSize = $false
-$outDirection.Location = New-Object System.Drawing.Point(196, 7)
-$outDirection.Size = New-Object System.Drawing.Size(28, 20)
-$outDirection.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$outDirection.Location = New-Object System.Drawing.Point(178, 37)
+$outDirection.Size = New-Object System.Drawing.Size(30, 31)
+$outDirection.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $outDirection.ForeColor = $colorAccent
 $createPanel.Controls.Add($outDirection)
-$outHint = New-Label '输出设备  ·  耳机 / 音箱' 7.5 'Bold'
-$outHint.AutoSize = $false
-$outHint.Location = New-Object System.Drawing.Point(228, 8)
-$outHint.Size = New-Object System.Drawing.Size(172, 20)
-$outHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$outHint.ForeColor = $colorMuted
-$createPanel.Controls.Add($outHint)
 $inDirection = New-Label 'IN' 7.5 'Bold'
 $inDirection.AutoSize = $false
-$inDirection.Location = New-Object System.Drawing.Point(428, 7)
-$inDirection.Size = New-Object System.Drawing.Size(21, 20)
-$inDirection.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$inDirection.Location = New-Object System.Drawing.Point(419, 37)
+$inDirection.Size = New-Object System.Drawing.Size(22, 31)
+$inDirection.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $inDirection.ForeColor = [System.Drawing.Color]::FromArgb(125, 183, 207)
 $createPanel.Controls.Add($inDirection)
-$inHint = New-Label '输入设备  ·  麦克风' 7.5 'Bold'
-$inHint.AutoSize = $false
-$inHint.Location = New-Object System.Drawing.Point(453, 8)
-$inHint.Size = New-Object System.Drawing.Size(174, 20)
-$inHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$inHint.ForeColor = $colorMuted
-$createPanel.Controls.Add($inHint)
 
 $profileNameBox = New-Object AudioSwitchNative.ModernTextBox
-$profileNameBox.Location = New-Object System.Drawing.Point(16, 34)
-$profileNameBox.Size = New-Object System.Drawing.Size(160, 31)
+$profileNameBox.Location = New-Object System.Drawing.Point(16, 37)
+$profileNameBox.Size = New-Object System.Drawing.Size(150, 31)
 $profileNameBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $profileNameBox.ForeColor = $colorTextPrimary
 $profileNameBox.FieldColor = $colorInput
 $profileNameBox.BorderColor = $colorBorder
 $profileNameBox.ActiveBorderColor = $colorAccent
+$profileNameBox.PlaceholderText = '方案名称'
 $createPanel.Controls.Add($profileNameBox)
 
 $outputCombo = New-Object AudioSwitchNative.ModernComboBox
-$outputCombo.Location = New-Object System.Drawing.Point(188, 34)
-$outputCombo.Size = New-Object System.Drawing.Size(220, 31)
+$outputCombo.Location = New-Object System.Drawing.Point(214, 37)
+$outputCombo.Size = New-Object System.Drawing.Size(193, 31)
 $outputCombo.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
 $outputCombo.ForeColor = $colorTextPrimary
 $outputCombo.FieldColor = $colorInput
@@ -2383,8 +2406,8 @@ $outputCombo.ActiveBorderColor = $colorAccent
 $createPanel.Controls.Add($outputCombo)
 
 $inputCombo = New-Object AudioSwitchNative.ModernComboBox
-$inputCombo.Location = New-Object System.Drawing.Point(420, 34)
-$inputCombo.Size = New-Object System.Drawing.Size(220, 31)
+$inputCombo.Location = New-Object System.Drawing.Point(447, 37)
+$inputCombo.Size = New-Object System.Drawing.Size(193, 31)
 $inputCombo.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
 $inputCombo.ForeColor = $colorTextPrimary
 $inputCombo.FieldColor = $colorInput
@@ -2395,7 +2418,7 @@ $createPanel.Controls.Add($inputCombo)
 $saveButton = New-Object AudioSwitchNative.ModernButton
 $saveButton.Text = '保存方案'
 $saveButton.Size = New-Object System.Drawing.Size(104, 31)
-$saveButton.Location = New-Object System.Drawing.Point(652, 33)
+$saveButton.Location = New-Object System.Drawing.Point(652, 37)
 $saveButton.FillColor = $colorAccent
 $saveButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
 $saveButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
@@ -2441,7 +2464,7 @@ $currentSettingsDivider.BackColor = [System.Drawing.Color]::FromArgb(42, 53, 64)
 $currentPanel.Controls.Add($currentSettingsDivider)
 
 $settingsPanel = New-Object System.Windows.Forms.Panel
-$settingsPanel.Location = New-Object System.Drawing.Point(16, 76)
+$settingsPanel.Location = New-Object System.Drawing.Point(16, 78)
 $settingsPanel.Size = New-Object System.Drawing.Size(740, 27)
 $settingsPanel.Anchor = 'Bottom,Left,Right'
 $settingsPanel.BackColor = [System.Drawing.Color]::Transparent
@@ -2494,8 +2517,8 @@ $settingsPanel.Controls.Add($startMinimizedCheck)
 $script:InitializingSettings = $false
 
 $savedSection = New-Object AudioSwitchNative.AcrylicPanel
-$savedSection.Location = New-Object System.Drawing.Point(24, 192)
-$savedSection.Size = New-Object System.Drawing.Size(772, 376)
+$savedSection.Location = New-Object System.Drawing.Point(24, 166)
+$savedSection.Size = New-Object System.Drawing.Size(772, 348)
 $savedSection.Anchor = 'Top,Bottom,Left,Right'
 $savedSection.CornerRadius = 16
 $savedSection.FillColor = [System.Drawing.Color]::FromArgb(118, 35, 46, 57)
@@ -2523,14 +2546,14 @@ $savedSection.Controls.Add($profilesCountLabel)
 
 $profilesViewport = New-Object System.Windows.Forms.Panel
 $profilesViewport.Location = New-Object System.Drawing.Point(10, 36)
-$profilesViewport.Size = New-Object System.Drawing.Size(752, 332)
+$profilesViewport.Size = New-Object System.Drawing.Size(752, 304)
 $profilesViewport.Anchor = 'Top,Bottom,Left,Right'
 $profilesViewport.BackColor = $savedSectionContentColor
 $savedSection.Controls.Add($profilesViewport)
 
 $profilePanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $profilePanel.Location = New-Object System.Drawing.Point(0, 0)
-$profilePanel.Size = New-Object System.Drawing.Size(752, 330)
+$profilePanel.Size = New-Object System.Drawing.Size(752, 304)
 $profilePanel.AutoScroll = $false
 $profilePanel.FlowDirection = 'TopDown'
 $profilePanel.WrapContents = $false
@@ -2544,7 +2567,7 @@ $profilesViewport.Controls.Add($profilePanel)
 
 $profileScroll = New-Object AudioSwitchNative.ModernVScrollBar
 $profileScroll.Location = New-Object System.Drawing.Point(758, 4)
-$profileScroll.Size = New-Object System.Drawing.Size(10, 322)
+$profileScroll.Size = New-Object System.Drawing.Size(10, 296)
 $profileScroll.Anchor = 'Top,Bottom,Right'
 $profileScroll.Visible = $false
 $profileScroll.Add_ValueChanged({ $profilePanel.Top = -$profileScroll.Value })
@@ -2565,7 +2588,7 @@ $profilesViewport.Add_MouseWheel({
 $profilesViewport.Add_MouseEnter({ $profilesViewport.Focus() })
 
 $noticePanel = New-Object AudioSwitchNative.AcrylicPanel
-$noticePanel.Location = New-Object System.Drawing.Point(24, 588)
+$noticePanel.Location = New-Object System.Drawing.Point(24, 534)
 $noticePanel.Size = New-Object System.Drawing.Size(772, 40)
 $noticePanel.Anchor = 'Bottom,Left,Right'
 $noticePanel.CornerRadius = 12
