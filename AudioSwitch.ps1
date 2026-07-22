@@ -427,6 +427,11 @@ namespace AudioSwitchNative
         }
 
         public void Clear() { editor.Clear(); }
+        public void SelectAll()
+        {
+            editor.Focus();
+            editor.SelectAll();
+        }
 
         protected override void OnFontChanged(EventArgs e)
         {
@@ -1060,6 +1065,8 @@ $script:HotkeyManager = $null
 $script:TrayHeaderPanel = $null
 $script:TrayHeaderBrand = $null
 $script:TrayCurrentLabel = $null
+$script:ProfileEditToolTip = $null
+$script:ProfileDragPrefix = 'AudioRouterProfile::'
 
 if (-not (Test-Path $script:AppDir)) { New-Item -ItemType Directory -Path $script:AppDir -Force | Out-Null }
 
@@ -1164,6 +1171,7 @@ function Show-MainWindow {
     $form.ShowInTaskbar = $true
     $form.Show()
     $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    Refresh-Devices
     $form.Activate()
     $form.BringToFront()
 }
@@ -1449,16 +1457,232 @@ function Show-HotkeyEditor($profile, [string]$PreviewPath) {
     $dialog.Dispose()
 }
 
+function Show-ProfileRenameEditor($profile) {
+    $dialog = New-Object AudioSwitchNative.BufferedForm
+    $dialog.Text = "重命名方案 · $($profile.Name)"
+    $dialog.ClientSize = New-Object System.Drawing.Size(430, 205)
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.BackColor = $colorBackground
+    $dialog.Opacity = 0.985
+    $dialog.ForeColor = $colorTextPrimary
+    $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+    $dialog.Icon = $appIcon
+
+    $title = New-Label '重命名音频方案' 14 'Bold'
+    $title.Location = New-Object System.Drawing.Point(24, 20)
+    $dialog.Controls.Add($title)
+    $hint = New-Label '名称会同步更新到托盘菜单和快捷键注册。' 8.2
+    $hint.Location = New-Object System.Drawing.Point(25, 52)
+    $hint.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($hint)
+
+    $nameBox = New-Object AudioSwitchNative.ModernTextBox
+    $nameBox.Text = [string]$profile.Name
+    $nameBox.Location = New-Object System.Drawing.Point(24, 82)
+    $nameBox.Size = New-Object System.Drawing.Size(382, 34)
+    $nameBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
+    $nameBox.ForeColor = $colorTextPrimary
+    $nameBox.FieldColor = $colorInput
+    $nameBox.BorderColor = $colorBorder
+    $nameBox.ActiveBorderColor = $colorAccent
+    $dialog.Controls.Add($nameBox)
+
+    $validation = New-Label '输入新的方案名称' 8
+    $validation.Location = New-Object System.Drawing.Point(25, 124)
+    $validation.ForeColor = $colorMuted
+    $dialog.Controls.Add($validation)
+
+    $cancelButton = New-Object AudioSwitchNative.ModernButton
+    $cancelButton.Text = '取消'
+    $cancelButton.Size = New-Object System.Drawing.Size(88, 34)
+    $cancelButton.Location = New-Object System.Drawing.Point(218, 153)
+    $cancelButton.FillColor = $colorSurface
+    $cancelButton.HoverFillColor = $colorElevated
+    $cancelButton.PressedFillColor = $colorInput
+    $cancelButton.BorderColor = $colorBorder
+    $cancelButton.CornerRadius = 9
+    $cancelButton.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($cancelButton)
+
+    $saveNameButton = New-Object AudioSwitchNative.ModernButton
+    $saveNameButton.Text = '保存名称'
+    $saveNameButton.Size = New-Object System.Drawing.Size(94, 34)
+    $saveNameButton.Location = New-Object System.Drawing.Point(312, 153)
+    $saveNameButton.FillColor = $colorAccent
+    $saveNameButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
+    $saveNameButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
+    $saveNameButton.BorderWidth = 0
+    $saveNameButton.CornerRadius = 9
+    $saveNameButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
+    $saveNameButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+    $dialog.Controls.Add($saveNameButton)
+
+    $state = [PSCustomObject]@{ Accepted = $false; Name = [string]$profile.Name }
+    $oldName = [string]$profile.Name
+    $saveNameButton.Add_Click({
+        $newName = $nameBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($newName)) {
+            $validation.Text = '方案名称不能为空'
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            return
+        }
+        $duplicate = @($script:Profiles | Where-Object { $_.Name -ine $oldName -and $_.Name -ieq $newName })
+        if ($duplicate.Count -gt 0) {
+            $validation.Text = '已经存在同名方案，请换一个名称'
+            $validation.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            return
+        }
+        $state.Name = $newName
+        $state.Accepted = $true
+        $dialog.Close()
+    }.GetNewClosure())
+    $cancelButton.Add_Click({ $dialog.Close() })
+    $dialog.AcceptButton = $saveNameButton
+    $dialog.Add_Shown({
+        [AudioSwitchNative.WindowEffects]::EnableSolidDark($dialog.Handle)
+        [AudioSwitchNative.WindowEffects]::ApplyIdentityAndIcon($dialog, $appIcon)
+        $nameBox.SelectAll()
+        $dialog.Activate()
+    }.GetNewClosure())
+
+    [void]$dialog.ShowDialog($form)
+    if ($state.Accepted -and $state.Name -ne $oldName) {
+        $profile.Name = $state.Name
+        Save-Profiles
+        [void](Register-ProfileHotkeys)
+        Render-Profiles
+        Rebuild-TrayMenu
+        Set-Status "已将方案「$oldName」重命名为「$($state.Name)」"
+    }
+    $dialog.Dispose()
+}
+
+function Show-ProfileDeviceEditor($profile, [bool]$EditOutput) {
+    try {
+        $flow = if ($EditOutput) { [AudioSwitchNative.DataFlow]::Render } else { [AudioSwitchNative.DataFlow]::Capture }
+        $devices = @([AudioSwitchNative.AudioManager]::GetEndpoints($flow))
+        if ($devices.Count -eq 0) { throw '当前没有检测到可用的音频设备' }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '无法读取音频设备', 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    $kindName = if ($EditOutput) { '输出设备' } else { '输入设备' }
+    $dialog = New-Object AudioSwitchNative.BufferedForm
+    $dialog.Text = "重新选择$kindName · $($profile.Name)"
+    $dialog.ClientSize = New-Object System.Drawing.Size(500, 220)
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.BackColor = $colorBackground
+    $dialog.Opacity = 0.985
+    $dialog.ForeColor = $colorTextPrimary
+    $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+    $dialog.Icon = $appIcon
+
+    $title = New-Label "重新选择$kindName" 14 'Bold'
+    $title.Location = New-Object System.Drawing.Point(24, 20)
+    $dialog.Controls.Add($title)
+    $hint = New-Label "方案：$($profile.Name)  ·  保存后可点击“切换方案”应用" 8.2
+    $hint.Location = New-Object System.Drawing.Point(25, 52)
+    $hint.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($hint)
+    $caption = New-Label $kindName 7.6 'Bold'
+    $caption.Location = New-Object System.Drawing.Point(25, 82)
+    $caption.ForeColor = if ($EditOutput) { $colorAccent } else { [System.Drawing.Color]::FromArgb(151, 211, 235) }
+    $dialog.Controls.Add($caption)
+
+    $deviceCombo = New-Object AudioSwitchNative.ModernComboBox
+    $deviceCombo.Location = New-Object System.Drawing.Point(24, 104)
+    $deviceCombo.Size = New-Object System.Drawing.Size(452, 34)
+    $deviceCombo.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+    $deviceCombo.ForeColor = $colorTextPrimary
+    $deviceCombo.FieldColor = $colorInput
+    $deviceCombo.BorderColor = $colorBorder
+    $deviceCombo.ActiveBorderColor = $colorAccent
+    foreach ($device in $devices) { [void]$deviceCombo.Items.Add($device) }
+    $currentId = if ($EditOutput) { [string]$profile.OutputId } else { [string]$profile.InputId }
+    $currentName = if ($EditOutput) { [string]$profile.OutputName } else { [string]$profile.InputName }
+    $selectedIndex = 0
+    for ($i = 0; $i -lt $devices.Count; $i++) {
+        if ($devices[$i].Id -eq $currentId -or $devices[$i].Name -eq $currentName) { $selectedIndex = $i; break }
+    }
+    $deviceCombo.SelectedIndex = $selectedIndex
+    $dialog.Controls.Add($deviceCombo)
+
+    $cancelButton = New-Object AudioSwitchNative.ModernButton
+    $cancelButton.Text = '取消'
+    $cancelButton.Size = New-Object System.Drawing.Size(94, 36)
+    $cancelButton.Location = New-Object System.Drawing.Point(282, 164)
+    $cancelButton.FillColor = $colorSurface
+    $cancelButton.HoverFillColor = $colorElevated
+    $cancelButton.PressedFillColor = $colorInput
+    $cancelButton.BorderColor = $colorBorder
+    $cancelButton.CornerRadius = 9
+    $cancelButton.ForeColor = $colorTextSecondary
+    $dialog.Controls.Add($cancelButton)
+
+    $saveDeviceButton = New-Object AudioSwitchNative.ModernButton
+    $saveDeviceButton.Text = '保存设备'
+    $saveDeviceButton.Size = New-Object System.Drawing.Size(100, 36)
+    $saveDeviceButton.Location = New-Object System.Drawing.Point(382, 164)
+    $saveDeviceButton.FillColor = $colorAccent
+    $saveDeviceButton.HoverFillColor = [System.Drawing.Color]::FromArgb(119, 239, 193)
+    $saveDeviceButton.PressedFillColor = [System.Drawing.Color]::FromArgb(81, 205, 151)
+    $saveDeviceButton.BorderWidth = 0
+    $saveDeviceButton.CornerRadius = 9
+    $saveDeviceButton.ForeColor = [System.Drawing.Color]::FromArgb(8, 27, 18)
+    $saveDeviceButton.Font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single]8.5, [System.Drawing.FontStyle]::Bold)
+    $dialog.Controls.Add($saveDeviceButton)
+
+    $state = [PSCustomObject]@{ Accepted = $false; Device = $null }
+    $saveDeviceButton.Add_Click({
+        if ($null -eq $deviceCombo.SelectedItem) { return }
+        $state.Device = $deviceCombo.SelectedItem
+        $state.Accepted = $true
+        $dialog.Close()
+    }.GetNewClosure())
+    $cancelButton.Add_Click({ $dialog.Close() })
+    $dialog.AcceptButton = $saveDeviceButton
+    $dialog.Add_Shown({
+        [AudioSwitchNative.WindowEffects]::EnableSolidDark($dialog.Handle)
+        [AudioSwitchNative.WindowEffects]::ApplyIdentityAndIcon($dialog, $appIcon)
+        $dialog.Activate()
+    })
+
+    [void]$dialog.ShowDialog($form)
+    if ($state.Accepted -and $null -ne $state.Device) {
+        if ($EditOutput) {
+            $profile.OutputId = $state.Device.Id
+            $profile.OutputName = $state.Device.Name
+        } else {
+            $profile.InputId = $state.Device.Id
+            $profile.InputName = $state.Device.Name
+        }
+        Save-Profiles
+        Render-Profiles
+        Rebuild-TrayMenu
+        Set-Status "已更新「$($profile.Name)」的$kindName"
+    }
+    $dialog.Dispose()
+}
+
 function Update-ResponsiveLayout {
     if ($null -ne $currentPanel -and $null -ne $outputTile -and $null -ne $inputTile) {
         $panelWidth = [Math]::Max(720, $currentPanel.ClientSize.Width)
         $tileWidth = [Math]::Floor(($panelWidth - 52) / 2)
-        $outputTile.Size = New-Object System.Drawing.Size($tileWidth, 46)
-        $inputTile.Location = New-Object System.Drawing.Point(($tileWidth + 36), 34)
-        $inputTile.Size = New-Object System.Drawing.Size($tileWidth, 46)
+        $outputTile.Size = New-Object System.Drawing.Size($tileWidth, 36)
+        $inputTile.Location = New-Object System.Drawing.Point(($tileWidth + 36), 26)
+        $inputTile.Size = New-Object System.Drawing.Size($tileWidth, 36)
         $currentOutputLabel.Width = [Math]::Max(180, $tileWidth - 68)
         $currentInputLabel.Width = [Math]::Max(180, $tileWidth - 68)
-        $routeBadge.Location = New-Object System.Drawing.Point(($panelWidth - $routeBadge.Width - 16), 10)
+        $routeBadge.Location = New-Object System.Drawing.Point(($panelWidth - $routeBadge.Width - 16), 7)
     }
 
     if ($null -ne $createPanel -and $null -ne $profileNameBox -and $null -ne $saveButton) {
@@ -1498,6 +1722,102 @@ function Get-ProfileCardHeight {
     return 104
 }
 
+function Move-ProfileToDropIndex([string]$ProfileName, [int]$DropIndex) {
+    $oldIndex = -1
+    for ($i = 0; $i -lt $script:Profiles.Count; $i++) {
+        if ($script:Profiles[$i].Name -eq $ProfileName) { $oldIndex = $i; break }
+    }
+    if ($oldIndex -lt 0) { return }
+
+    $items = New-Object System.Collections.ArrayList
+    foreach ($item in @($script:Profiles)) { [void]$items.Add($item) }
+    $moving = $items[$oldIndex]
+    $items.RemoveAt($oldIndex)
+    if ($oldIndex -lt $DropIndex) { $DropIndex-- }
+    $DropIndex = [Math]::Max(0, [Math]::Min($items.Count, $DropIndex))
+    if ($DropIndex -eq $oldIndex) { return }
+    $items.Insert($DropIndex, $moving)
+    $script:Profiles = @($items.ToArray())
+    Save-Profiles
+    Render-Profiles
+    Rebuild-TrayMenu
+    Set-Status "已调整方案「$ProfileName」的排列顺序"
+}
+
+function Get-ProfileDragText($DataObject) {
+    if ($null -eq $DataObject) { return '' }
+    foreach ($format in @(
+        [System.Windows.Forms.DataFormats]::UnicodeText,
+        [System.Windows.Forms.DataFormats]::Text,
+        [string].FullName
+    )) {
+        try {
+            if (-not $DataObject.GetDataPresent($format, $true)) { continue }
+            $value = [string]$DataObject.GetData($format, $true)
+            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+        } catch { }
+    }
+    return ''
+}
+
+function Register-ProfileDropTarget($Control) {
+    if ($null -eq $Control) { return }
+    $Control.AllowDrop = $true
+    $Control.Add_DragEnter({
+        param($sender, $eventArgs)
+        $data = Get-ProfileDragText $eventArgs.Data
+        $eventArgs.Effect = if ($data.StartsWith($script:ProfileDragPrefix)) { [System.Windows.Forms.DragDropEffects]::Move } else { [System.Windows.Forms.DragDropEffects]::None }
+    })
+    $Control.Add_DragOver({
+        param($sender, $eventArgs)
+        $data = Get-ProfileDragText $eventArgs.Data
+        $eventArgs.Effect = if ($data.StartsWith($script:ProfileDragPrefix)) { [System.Windows.Forms.DragDropEffects]::Move } else { [System.Windows.Forms.DragDropEffects]::None }
+    })
+    $Control.Add_DragDrop({
+        param($sender, $eventArgs)
+        $data = Get-ProfileDragText $eventArgs.Data
+        if (-not $data.StartsWith($script:ProfileDragPrefix)) { return }
+        $profileName = $data.Substring($script:ProfileDragPrefix.Length)
+        $point = $profilePanel.PointToClient((New-Object System.Drawing.Point($eventArgs.X, $eventArgs.Y)))
+        $dropIndex = 0
+        foreach ($profileCard in @($profilePanel.Controls | Sort-Object Top)) {
+            if ($null -eq $profileCard.Tag) { continue }
+            if ($point.Y -lt ($profileCard.Top + [Math]::Floor($profileCard.Height / 2))) { break }
+            $dropIndex++
+        }
+        Move-ProfileToDropIndex $profileName $dropIndex
+    })
+}
+
+function Register-ProfileDragSource($Control, [string]$ProfileName) {
+    if ($null -eq $Control) { return }
+    $dragState = [PSCustomObject]@{
+        Armed   = $false
+        Start   = [System.Drawing.Point]::Empty
+        Payload = $script:ProfileDragPrefix + $ProfileName
+    }
+    $Control.Add_MouseDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+        $dragState.Start = $eventArgs.Location
+        $dragState.Armed = $true
+    }.GetNewClosure())
+    $Control.Add_MouseMove({
+        param($sender, $eventArgs)
+        if (-not $dragState.Armed -or $eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+        $dragSize = [System.Windows.Forms.SystemInformation]::DragSize
+        $movedX = [Math]::Abs($eventArgs.X - $dragState.Start.X)
+        $movedY = [Math]::Abs($eventArgs.Y - $dragState.Start.Y)
+        if ($movedX -lt [Math]::Max(2, [Math]::Floor($dragSize.Width / 2)) -and
+            $movedY -lt [Math]::Max(2, [Math]::Floor($dragSize.Height / 2))) { return }
+        $dragState.Armed = $false
+        $dragData = New-Object System.Windows.Forms.DataObject
+        $dragData.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $dragState.Payload)
+        [void]$sender.DoDragDrop($dragData, [System.Windows.Forms.DragDropEffects]::Move)
+    }.GetNewClosure())
+    $Control.Add_MouseUp({ $dragState.Armed = $false }.GetNewClosure())
+}
+
 function Render-Profiles {
     $profilePanel.SuspendLayout()
     $profilePanel.Controls.Clear()
@@ -1523,15 +1843,29 @@ function Render-Profiles {
         $card.BorderColor = if ($isActive) { [System.Drawing.Color]::FromArgb(225, 104, 231, 179) } else { [System.Drawing.Color]::FromArgb(82, 79, 95, 111) }
         $card.BorderWidth = if ($isActive) { [single]2 } else { [single]1 }
         $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 9)
+        $card.Tag = $profile
+        $card.Cursor = [System.Windows.Forms.Cursors]::SizeNS
+
+        $dragHandle = New-Label '≡' 11 'Bold'
+        $dragHandle.Font = [System.Drawing.Font]::new('Segoe UI Symbol', [single]11, [System.Drawing.FontStyle]::Bold)
+        $dragHandle.Location = New-Object System.Drawing.Point(14, 10)
+        $dragHandle.ForeColor = if ($isActive) { $colorAccent } else { $colorMuted }
+        $dragHandle.Cursor = [System.Windows.Forms.Cursors]::SizeNS
+        if ($null -ne $script:ProfileEditToolTip) { $script:ProfileEditToolTip.SetToolTip($dragHandle, '上下拖动调整方案顺序') }
+        $card.Controls.Add($dragHandle)
 
         $statusDot = New-Label '●' 7
-        $statusDot.Location = New-Object System.Drawing.Point(18, 17)
+        $statusDot.Location = New-Object System.Drawing.Point(34, 17)
         $statusDot.ForeColor = if ($isActive) { $colorAccent } else { $colorMuted }
         $card.Controls.Add($statusDot)
 
         $name = New-Label $profile.Name 10.5 'Bold'
-        $name.Location = New-Object System.Drawing.Point(35, 14)
-        $name.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(220, $(if ($isActive) { $actionLeft - 180 } else { $actionLeft - 70 }))), 24)
+        $name.Location = New-Object System.Drawing.Point(50, 14)
+        $name.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(200, $(if ($isActive) { $actionLeft - 195 } else { $actionLeft - 85 }))), 24)
+        $name.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $capturedRenameProfile = $profile
+        $name.Add_DoubleClick({ Show-ProfileRenameEditor $capturedRenameProfile }.GetNewClosure())
+        if ($null -ne $script:ProfileEditToolTip) { $script:ProfileEditToolTip.SetToolTip($name, '双击重命名方案') }
         $card.Controls.Add($name)
 
         if ($isActive) {
@@ -1584,6 +1918,10 @@ function Render-Profiles {
         $outputValue.AutoSize = $false
         $outputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $inputStart - 40)), 20)
         $outputValue.AutoEllipsis = $true
+        $outputValue.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $capturedOutputProfile = $profile
+        $outputValue.Add_DoubleClick({ Show-ProfileDeviceEditor $capturedOutputProfile $true }.GetNewClosure())
+        if ($null -ne $script:ProfileEditToolTip) { $script:ProfileEditToolTip.SetToolTip($outputValue, '双击重新选择输出设备') }
         $card.Controls.Add($outputValue)
 
         $inputCaption = New-Label 'IN' 8 'Bold'
@@ -1596,6 +1934,10 @@ function Render-Profiles {
         $inputValue.AutoSize = $false
         $inputValue.Size = New-Object System.Drawing.Size(([Math]::Max(120, $actionLeft - $inputStart - 20)), 20)
         $inputValue.AutoEllipsis = $true
+        $inputValue.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $capturedInputProfile = $profile
+        $inputValue.Add_DoubleClick({ Show-ProfileDeviceEditor $capturedInputProfile $false }.GetNewClosure())
+        if ($null -ne $script:ProfileEditToolTip) { $script:ProfileEditToolTip.SetToolTip($inputValue, '双击重新选择输入设备') }
         $card.Controls.Add($inputValue)
 
         $switchButton = New-Object AudioSwitchNative.ModernButton
@@ -1650,6 +1992,18 @@ function Render-Profiles {
             Set-Status "已删除方案「$capturedName」"
         }.GetNewClosure())
         $card.Controls.Add($deleteButton)
+
+        # The card background and its descriptive labels are all valid drag
+        # handles. Interactive buttons remain click-only, while name/device
+        # labels still support their existing double-click editors.
+        foreach ($dragSource in @(
+            $card, $dragHandle, $statusDot, $name, $detailDivider,
+            $outputCaption, $outputValue, $inputCaption, $inputValue
+        )) {
+            Register-ProfileDragSource $dragSource ([string]$profile.Name)
+        }
+        Register-ProfileDropTarget $card
+        foreach ($childControl in @($card.Controls)) { Register-ProfileDropTarget $childControl }
         [void]$profilePanel.Controls.Add($card)
     }
     $profilePanel.ResumeLayout()
@@ -1841,7 +2195,7 @@ $colorAccent = [System.Drawing.Color]::FromArgb(104, 231, 179)
 
 $form = New-Object AudioSwitchNative.BufferedForm
 $form.Text = 'AUDIO ROUTER'
-$form.ClientSize = New-Object System.Drawing.Size(820, 836)
+$form.ClientSize = New-Object System.Drawing.Size(820, 780)
 $form.MinimumSize = New-Object System.Drawing.Size(836, 700)
 $form.StartPosition = 'CenterScreen'
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
@@ -1851,15 +2205,15 @@ $form.ForeColor = $colorTextPrimary
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $form.Icon = $appIcon
 
-$brandAudio = New-Label 'A U D I O' 8.2 'Bold'
-$brandAudio.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]8.2, [System.Drawing.FontStyle]::Bold)
-$brandAudio.Location = New-Object System.Drawing.Point(28, 16)
-$brandAudio.ForeColor = $colorAccent
+$brandAudio = New-Label 'AUDIO' 8.4 'Bold'
+$brandAudio.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]8.4, [System.Drawing.FontStyle]::Bold)
+$brandAudio.Location = New-Object System.Drawing.Point(31, 14)
+$brandAudio.ForeColor = [System.Drawing.Color]::FromArgb(91, 199, 158)
 $form.Controls.Add($brandAudio)
-$brandRouter = New-Label 'ROUTER' 24 'Bold'
-$brandRouter.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]24, [System.Drawing.FontStyle]::Bold)
-$brandRouter.Location = New-Object System.Drawing.Point(28, 30)
-$brandRouter.ForeColor = $colorTextPrimary
+$brandRouter = New-Label 'ROUTER' 23.5 'Bold'
+$brandRouter.Font = [System.Drawing.Font]::new('Bahnschrift SemiBold', [single]23.5, [System.Drawing.FontStyle]::Bold)
+$brandRouter.Location = New-Object System.Drawing.Point(28, 28)
+$brandRouter.ForeColor = [System.Drawing.Color]::FromArgb(232, 237, 242)
 $form.Controls.Add($brandRouter)
 
 $refreshButton = New-Object AudioSwitchNative.ModernButton
@@ -1878,80 +2232,80 @@ $refreshButton.Add_Click({ Refresh-Devices })
 $form.Controls.Add($refreshButton)
 
 $currentPanel = New-Object AudioSwitchNative.AcrylicPanel
-$currentPanel.Location = New-Object System.Drawing.Point(24, 82)
-$currentPanel.Size = New-Object System.Drawing.Size(772, 92)
-$currentPanel.Anchor = 'Top,Left,Right'
+$currentPanel.Location = New-Object System.Drawing.Point(24, 644)
+$currentPanel.Size = New-Object System.Drawing.Size(772, 112)
+$currentPanel.Anchor = 'Bottom,Left,Right'
 $currentPanel.CornerRadius = 14
-$currentPanel.FillColor = [System.Drawing.Color]::FromArgb(164, 43, 54, 65)
-$currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(88, 84, 100, 116)
+$currentPanel.FillColor = [System.Drawing.Color]::FromArgb(128, 43, 54, 65)
+$currentPanel.BorderColor = [System.Drawing.Color]::FromArgb(64, 84, 100, 116)
 $form.Controls.Add($currentPanel)
-$now = New-Label 'ACTIVE AUDIO ROUTE' 7.5 'Bold'
-$now.Location = New-Object System.Drawing.Point(16, 10)
-$now.ForeColor = $colorAccent
+$now = New-Label 'ACTIVE AUDIO DEVICE' 7.1 'Bold'
+$now.Location = New-Object System.Drawing.Point(16, 7)
+$now.ForeColor = [System.Drawing.Color]::FromArgb(91, 199, 158)
 $currentPanel.Controls.Add($now)
 
-$routeBadge = New-Label '●  WINDOWS DEFAULT' 7.2 'Bold'
-$routeBadge.Location = New-Object System.Drawing.Point(624, 10)
-$routeBadge.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
+$routeBadge = New-Label '●  WINDOWS DEFAULT' 6.8 'Bold'
+$routeBadge.Location = New-Object System.Drawing.Point(624, 7)
+$routeBadge.ForeColor = [System.Drawing.Color]::FromArgb(125, 183, 207)
 $currentPanel.Controls.Add($routeBadge)
 
 $outputTile = New-Object AudioSwitchNative.AcrylicPanel
-$outputTile.Location = New-Object System.Drawing.Point(16, 34)
-$outputTile.Size = New-Object System.Drawing.Size(360, 46)
+$outputTile.Location = New-Object System.Drawing.Point(16, 26)
+$outputTile.Size = New-Object System.Drawing.Size(360, 36)
 $outputTile.CornerRadius = 10
-$outputTile.FillColor = [System.Drawing.Color]::FromArgb(148, 28, 37, 46)
-$outputTile.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
+$outputTile.FillColor = [System.Drawing.Color]::FromArgb(112, 28, 37, 46)
+$outputTile.BorderColor = [System.Drawing.Color]::FromArgb(58, 78, 94, 109)
 $currentPanel.Controls.Add($outputTile)
-$outputTag = New-Label 'OUT' 7.5 'Bold'
-$outputTag.Location = New-Object System.Drawing.Point(12, 15)
-$outputTag.ForeColor = $colorAccent
+$outputTag = New-Label 'OUT' 7.1 'Bold'
+$outputTag.Location = New-Object System.Drawing.Point(12, 10)
+$outputTag.ForeColor = [System.Drawing.Color]::FromArgb(91, 199, 158)
 $outputTile.Controls.Add($outputTag)
-$outCaption = New-Label '输出设备 · SYSTEM DEFAULT' 6.8 'Bold'
-$outCaption.Location = New-Object System.Drawing.Point(54, 5)
+$outCaption = New-Label '输出设备 · SYSTEM DEFAULT' 6.3 'Bold'
+$outCaption.Location = New-Object System.Drawing.Point(52, 2)
 $outCaption.ForeColor = $colorMuted
 $outputTile.Controls.Add($outCaption)
-$currentOutputLabel = New-Label '读取中…' 9.5 'Bold'
-$currentOutputLabel.Location = New-Object System.Drawing.Point(54, 21)
-$currentOutputLabel.ForeColor = $colorTextPrimary
+$currentOutputLabel = New-Label '读取中…' 8.5 'Bold'
+$currentOutputLabel.Location = New-Object System.Drawing.Point(52, 16)
+$currentOutputLabel.ForeColor = $colorTextSecondary
 $currentOutputLabel.AutoSize = $false
 $currentOutputLabel.Size = New-Object System.Drawing.Size(292, 20)
 $currentOutputLabel.AutoEllipsis = $true
 $outputTile.Controls.Add($currentOutputLabel)
 
 $inputTile = New-Object AudioSwitchNative.AcrylicPanel
-$inputTile.Location = New-Object System.Drawing.Point(396, 34)
-$inputTile.Size = New-Object System.Drawing.Size(360, 46)
+$inputTile.Location = New-Object System.Drawing.Point(396, 26)
+$inputTile.Size = New-Object System.Drawing.Size(360, 36)
 $inputTile.CornerRadius = 10
-$inputTile.FillColor = [System.Drawing.Color]::FromArgb(148, 28, 37, 46)
-$inputTile.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
+$inputTile.FillColor = [System.Drawing.Color]::FromArgb(112, 28, 37, 46)
+$inputTile.BorderColor = [System.Drawing.Color]::FromArgb(58, 78, 94, 109)
 $currentPanel.Controls.Add($inputTile)
-$inputTag = New-Label 'IN' 7.5 'Bold'
-$inputTag.Location = New-Object System.Drawing.Point(12, 15)
-$inputTag.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
+$inputTag = New-Label 'IN' 7.1 'Bold'
+$inputTag.Location = New-Object System.Drawing.Point(12, 10)
+$inputTag.ForeColor = [System.Drawing.Color]::FromArgb(125, 183, 207)
 $inputTile.Controls.Add($inputTag)
-$inCaption = New-Label '输入设备 · SYSTEM DEFAULT' 6.8 'Bold'
-$inCaption.Location = New-Object System.Drawing.Point(54, 5)
+$inCaption = New-Label '输入设备 · SYSTEM DEFAULT' 6.3 'Bold'
+$inCaption.Location = New-Object System.Drawing.Point(52, 2)
 $inCaption.ForeColor = $colorMuted
 $inputTile.Controls.Add($inCaption)
-$currentInputLabel = New-Label '读取中…' 9.5 'Bold'
-$currentInputLabel.Location = New-Object System.Drawing.Point(54, 21)
-$currentInputLabel.ForeColor = $colorTextPrimary
+$currentInputLabel = New-Label '读取中…' 8.5 'Bold'
+$currentInputLabel.Location = New-Object System.Drawing.Point(52, 16)
+$currentInputLabel.ForeColor = $colorTextSecondary
 $currentInputLabel.AutoSize = $false
 $currentInputLabel.Size = New-Object System.Drawing.Size(292, 20)
 $currentInputLabel.AutoEllipsis = $true
 $inputTile.Controls.Add($currentInputLabel)
 
-$createLabel = New-Label '新建或更新方案' 10.5 'Bold'
-$createLabel.Location = New-Object System.Drawing.Point(24, 192)
+$createLabel = New-Label '新建或更新方案' 11 'Bold'
+$createLabel.Location = New-Object System.Drawing.Point(24, 72)
 $createLabel.ForeColor = $colorTextPrimary
 $form.Controls.Add($createLabel)
 $createHelp = New-Label '同名方案会自动更新' 7.5
-$createHelp.Location = New-Object System.Drawing.Point(154, 196)
+$createHelp.Location = New-Object System.Drawing.Point(158, 77)
 $createHelp.ForeColor = $colorMuted
 $form.Controls.Add($createHelp)
 
 $createPanel = New-Object AudioSwitchNative.AcrylicPanel
-$createPanel.Location = New-Object System.Drawing.Point(24, 220)
+$createPanel.Location = New-Object System.Drawing.Point(24, 100)
 $createPanel.Size = New-Object System.Drawing.Size(772, 76)
 $createPanel.Anchor = 'Top,Left,Right'
 $createPanel.CornerRadius = 14
@@ -2018,17 +2372,21 @@ $saveButton.Add_Click({
     if (-not $name) { Set-Status '请给方案起个名字，例如「耳机」或「音箱」' $true; return }
     if (-not $outputCombo.SelectedItem -or -not $inputCombo.SelectedItem) { Set-Status '请同时选择输出和输入设备' $true; return }
     $existingProfile = @($script:Profiles | Where-Object { $_.Name -eq $name } | Select-Object -First 1)
-    $existingModifiers = if ($existingProfile.Count) { [int]$existingProfile[0].HotkeyModifiers } else { 0 }
-    $existingKey = if ($existingProfile.Count) { [int]$existingProfile[0].HotkeyKey } else { 0 }
-    $script:Profiles = @($script:Profiles | Where-Object { $_.Name -ne $name })
-    $script:Profiles += [PSCustomObject]@{
-        Name = $name
-        OutputId = $outputCombo.SelectedItem.Id
-        OutputName = $outputCombo.SelectedItem.Name
-        InputId = $inputCombo.SelectedItem.Id
-        InputName = $inputCombo.SelectedItem.Name
-        HotkeyModifiers = $existingModifiers
-        HotkeyKey = $existingKey
+    if ($existingProfile.Count) {
+        $existingProfile[0].OutputId = $outputCombo.SelectedItem.Id
+        $existingProfile[0].OutputName = $outputCombo.SelectedItem.Name
+        $existingProfile[0].InputId = $inputCombo.SelectedItem.Id
+        $existingProfile[0].InputName = $inputCombo.SelectedItem.Name
+    } else {
+        $script:Profiles += [PSCustomObject]@{
+            Name = $name
+            OutputId = $outputCombo.SelectedItem.Id
+            OutputName = $outputCombo.SelectedItem.Name
+            InputId = $inputCombo.SelectedItem.Id
+            InputName = $inputCombo.SelectedItem.Name
+            HotkeyModifiers = 0
+            HotkeyKey = 0
+        }
     }
     Save-Profiles
     [void](Register-ProfileHotkeys)
@@ -2039,16 +2397,21 @@ $saveButton.Add_Click({
 })
 $createPanel.Controls.Add($saveButton)
 
-$settingsPanel = New-Object AudioSwitchNative.AcrylicPanel
-$settingsPanel.Location = New-Object System.Drawing.Point(24, 756)
-$settingsPanel.Size = New-Object System.Drawing.Size(772, 46)
+$currentSettingsDivider = New-Object System.Windows.Forms.Panel
+$currentSettingsDivider.Location = New-Object System.Drawing.Point(16, 68)
+$currentSettingsDivider.Size = New-Object System.Drawing.Size(740, 1)
+$currentSettingsDivider.Anchor = 'Bottom,Left,Right'
+$currentSettingsDivider.BackColor = [System.Drawing.Color]::FromArgb(42, 53, 64)
+$currentPanel.Controls.Add($currentSettingsDivider)
+
+$settingsPanel = New-Object System.Windows.Forms.Panel
+$settingsPanel.Location = New-Object System.Drawing.Point(16, 74)
+$settingsPanel.Size = New-Object System.Drawing.Size(740, 26)
 $settingsPanel.Anchor = 'Bottom,Left,Right'
-$settingsPanel.CornerRadius = 12
-$settingsPanel.FillColor = [System.Drawing.Color]::FromArgb(148, 39, 50, 61)
-$settingsPanel.BorderColor = [System.Drawing.Color]::FromArgb(76, 78, 94, 109)
-$form.Controls.Add($settingsPanel)
-$settingsCaption = New-Label '运行设置' 7.5 'Bold'
-$settingsCaption.Location = New-Object System.Drawing.Point(16, 15)
+$settingsPanel.BackColor = [System.Drawing.Color]::Transparent
+$currentPanel.Controls.Add($settingsPanel)
+$settingsCaption = New-Label '运行设置' 7.1 'Bold'
+$settingsCaption.Location = New-Object System.Drawing.Point(16, 5)
 $settingsCaption.ForeColor = $colorMuted
 $settingsPanel.Controls.Add($settingsCaption)
 
@@ -2056,7 +2419,7 @@ $startupCheck = New-Object AudioSwitchNative.ModernCheckBox
 $startupCheck.Text = '随 Windows 启动'
 $startupCheck.AutoSize = $false
 $startupCheck.Size = New-Object System.Drawing.Size(142, 24)
-$startupCheck.Location = New-Object System.Drawing.Point(94, 11)
+$startupCheck.Location = New-Object System.Drawing.Point(94, 0)
 $startupCheck.ForeColor = $colorTextSecondary
 $startupCheck.Checked = Test-StartupRegistration
 $startupCheck.Add_CheckedChanged({
@@ -2078,7 +2441,7 @@ $startMinimizedCheck = New-Object AudioSwitchNative.ModernCheckBox
 $startMinimizedCheck.Text = '启动后直接隐藏到托盘'
 $startMinimizedCheck.AutoSize = $false
 $startMinimizedCheck.Size = New-Object System.Drawing.Size(190, 24)
-$startMinimizedCheck.Location = New-Object System.Drawing.Point(250, 11)
+$startMinimizedCheck.Location = New-Object System.Drawing.Point(250, 0)
 $startMinimizedCheck.ForeColor = $colorTextSecondary
 $startMinimizedCheck.Checked = [bool]$script:Settings.StartMinimized
 $startMinimizedCheck.Add_CheckedChanged({
@@ -2091,22 +2454,40 @@ $startMinimizedCheck.Add_CheckedChanged({
 $settingsPanel.Controls.Add($startMinimizedCheck)
 $script:InitializingSettings = $false
 
-$savedLabel = New-Label '我的音频方案' 10.5 'Bold'
-$savedLabel.Location = New-Object System.Drawing.Point(24, 318)
+$savedSection = New-Object AudioSwitchNative.AcrylicPanel
+$savedSection.Location = New-Object System.Drawing.Point(24, 188)
+$savedSection.Size = New-Object System.Drawing.Size(772, 376)
+$savedSection.Anchor = 'Top,Bottom,Left,Right'
+$savedSection.CornerRadius = 16
+$savedSection.FillColor = [System.Drawing.Color]::FromArgb(118, 35, 46, 57)
+$savedSection.BorderColor = [System.Drawing.Color]::FromArgb(168, 79, 145, 119)
+$savedSection.BorderWidth = [single]1.4
+$form.Controls.Add($savedSection)
+# Match the opaque child controls to the acrylic fill after it is composited
+# over the main background. This prevents the viewport from appearing as a
+# separate dark rectangle inside the rounded section.
+$savedSectionContentColor = [System.Drawing.Color]::FromArgb(26, 35, 44)
+
+$savedLabel = New-Label '我的音频方案' 11 'Bold'
+$savedLabel.Location = New-Object System.Drawing.Point(16, 10)
 $savedLabel.ForeColor = $colorTextPrimary
-$form.Controls.Add($savedLabel)
+$savedSection.Controls.Add($savedLabel)
+$savedHelp = New-Label '拖动方案卡片排序  ·  双击名称或设备进行编辑' 7.5
+$savedHelp.Location = New-Object System.Drawing.Point(126, 15)
+$savedHelp.ForeColor = $colorMuted
+$savedSection.Controls.Add($savedHelp)
 $profilesCountLabel = New-Label '0 个方案' 7.5
-$profilesCountLabel.Location = New-Object System.Drawing.Point(730, 322)
+$profilesCountLabel.Location = New-Object System.Drawing.Point(706, 15)
 $profilesCountLabel.Anchor = 'Top,Right'
 $profilesCountLabel.ForeColor = $colorMuted
-$form.Controls.Add($profilesCountLabel)
+$savedSection.Controls.Add($profilesCountLabel)
 
 $profilesViewport = New-Object System.Windows.Forms.Panel
-$profilesViewport.Location = New-Object System.Drawing.Point(24, 346)
-$profilesViewport.Size = New-Object System.Drawing.Size(772, 330)
+$profilesViewport.Location = New-Object System.Drawing.Point(10, 36)
+$profilesViewport.Size = New-Object System.Drawing.Size(752, 332)
 $profilesViewport.Anchor = 'Top,Bottom,Left,Right'
-$profilesViewport.BackColor = $colorBackground
-$form.Controls.Add($profilesViewport)
+$profilesViewport.BackColor = $savedSectionContentColor
+$savedSection.Controls.Add($profilesViewport)
 
 $profilePanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $profilePanel.Location = New-Object System.Drawing.Point(0, 0)
@@ -2114,7 +2495,12 @@ $profilePanel.Size = New-Object System.Drawing.Size(752, 330)
 $profilePanel.AutoScroll = $false
 $profilePanel.FlowDirection = 'TopDown'
 $profilePanel.WrapContents = $false
-$profilePanel.BackColor = $colorBackground
+$profilePanel.BackColor = $savedSectionContentColor
+$script:ProfileEditToolTip = New-Object System.Windows.Forms.ToolTip
+$script:ProfileEditToolTip.InitialDelay = 450
+$script:ProfileEditToolTip.ReshowDelay = 120
+$script:ProfileEditToolTip.AutoPopDelay = 5000
+Register-ProfileDropTarget $profilePanel
 $profilesViewport.Controls.Add($profilePanel)
 
 $profileScroll = New-Object AudioSwitchNative.ModernVScrollBar
@@ -2140,24 +2526,20 @@ $profilesViewport.Add_MouseWheel({
 $profilesViewport.Add_MouseEnter({ $profilesViewport.Focus() })
 
 $noticePanel = New-Object AudioSwitchNative.AcrylicPanel
-$noticePanel.Location = New-Object System.Drawing.Point(24, 688)
-$noticePanel.Size = New-Object System.Drawing.Size(772, 54)
+$noticePanel.Location = New-Object System.Drawing.Point(24, 580)
+$noticePanel.Size = New-Object System.Drawing.Size(772, 40)
 $noticePanel.Anchor = 'Bottom,Left,Right'
 $noticePanel.CornerRadius = 12
-$noticePanel.FillColor = [System.Drawing.Color]::FromArgb(152, 31, 55, 62)
-$noticePanel.BorderColor = [System.Drawing.Color]::FromArgb(92, 67, 125, 141)
+$noticePanel.FillColor = [System.Drawing.Color]::FromArgb(105, 31, 55, 62)
+$noticePanel.BorderColor = [System.Drawing.Color]::FromArgb(65, 67, 125, 141)
 $form.Controls.Add($noticePanel)
-$notice = New-Label '使用提示  ·  请在 Discord 与 Steam 中，将输入和输出设备设为 Default / 默认' 8.2 'Bold'
-$notice.Location = New-Object System.Drawing.Point(16, 8)
-$notice.ForeColor = [System.Drawing.Color]::FromArgb(151, 211, 235)
+$notice = New-Label '提示  ·  Discord 与 Steam 的输入和输出请保持 Default / 默认；通话未更新时重新进入语音频道。' 7.7
+$notice.Location = New-Object System.Drawing.Point(16, 11)
+$notice.ForeColor = [System.Drawing.Color]::FromArgb(143, 184, 201)
 $noticePanel.Controls.Add($notice)
-$notice2 = New-Label '通话中若没有立即更新，退出并重新进入语音频道即可。' 7.8
-$notice2.Location = New-Object System.Drawing.Point(16, 30)
-$notice2.ForeColor = [System.Drawing.Color]::FromArgb(173, 201, 214)
-$noticePanel.Controls.Add($notice2)
 
 $statusLabel = New-Label '准备就绪' 8
-$statusLabel.Location = New-Object System.Drawing.Point(500, 15)
+$statusLabel.Location = New-Object System.Drawing.Point(468, 4)
 $statusLabel.Anchor = 'Top,Right'
 $statusLabel.ForeColor = $colorAccent
 $statusLabel.MaximumSize = New-Object System.Drawing.Size(250, 20)
@@ -2246,6 +2628,7 @@ $form.Add_Shown({
 $form.Add_FormClosed({
     $responsiveTimer.Stop()
     $responsiveTimer.Dispose()
+    if ($null -ne $script:ProfileEditToolTip) { $script:ProfileEditToolTip.Dispose(); $script:ProfileEditToolTip = $null }
     if ($null -ne $script:HotkeyManager) { $script:HotkeyManager.Dispose(); $script:HotkeyManager = $null }
     $trayIcon.Visible = $false
     $trayIcon.Dispose()
@@ -2327,8 +2710,8 @@ if (-not [string]::IsNullOrWhiteSpace($UiPreviewPath)) {
     $form.Invalidate($true)
     $form.Update()
     $form.PerformLayout()
-    $preview = New-Object System.Drawing.Bitmap($form.ClientSize.Width, $form.ClientSize.Height)
-    $form.DrawToBitmap($preview, (New-Object System.Drawing.Rectangle(0, 0, $form.ClientSize.Width, $form.ClientSize.Height)))
+    $preview = New-Object System.Drawing.Bitmap($form.Width, $form.Height)
+    $form.DrawToBitmap($preview, (New-Object System.Drawing.Rectangle(0, 0, $form.Width, $form.Height)))
     $preview.Save($UiPreviewPath, [System.Drawing.Imaging.ImageFormat]::Png)
     $preview.Dispose()
     $form.Hide()
